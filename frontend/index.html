@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>个人技术知识库助手</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- 顶部栏 -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">📚</span>
+        <div>
+          <h1>个人技术知识库助手</h1>
+          <p class="subtitle">LangGraph · RAG · 流式回答</p>
+        </div>
+      </div>
+      <div class="actions">
+        <span id="status-dot" class="dot" title="服务状态"></span>
+        <button id="upload-btn" class="btn ghost" type="button">上传文档</button>
+        <button id="new-chat-btn" class="btn" type="button">新对话</button>
+        <input id="file-input" type="file" accept=".md,.markdown,.txt,.pdf,.html,.htm,.rst,.json,.yaml,.yml,.log" hidden />
+      </div>
+    </header>
+
+    <!-- 消息区 -->
+    <main id="messages" class="messages" aria-live="polite">
+      <div class="empty-state" id="empty-state">
+        <h2>开始提问吧</h2>
+        <p>试着问：「什么是任务分解？」「RAG 的检索流程是怎样的？」</p>
+        <p class="hint">寒暄类问题（如「你好」）不会触发知识库检索。</p>
+      </div>
+    </main>
+
+    <!-- 输入区 -->
+    <footer class="composer">
+      <textarea id="input" rows="1" placeholder="输入问题，Enter 发送 / Shift + Enter 换行"></textarea>
+      <button id="send-btn" class="btn primary" type="button">发送</button>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

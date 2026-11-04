@@ -1,0 +1,19 @@
+# 环境与密钥（.env 含真实 API Key，严禁提交）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行时数据（向量库 / 上传文档）
+chroma_db/
+data/*
+!data/sample.md
+
+# 日志与其他
+*.log
+.DS_Store
+.idea/
+.vscode/
