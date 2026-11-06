@@ -56,6 +56,7 @@ tech-chat/
 ## 三、快速开始
 
 ```bash
+python -m venv .venv && .venv\Scriptsctivate   # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt      # 或 pip install -r requirements-lock.txt 锁定版本
 cp .env.example .env                 # 填入 LLM 的 base_url / api_key / model
 python run.py                        # 默认 http://127.0.0.1:8000
