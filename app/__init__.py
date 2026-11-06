@@ -1,4 +1,4 @@
-"""个人技术知识库聊天助手（backend package）。"""
+"""CCF-A 论文发现助手（backend package）。"""
 
 __version__ = "0.1.0"
 

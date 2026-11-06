@@ -19,6 +19,7 @@ langgraph-checkpoint-sqlite>=2.0.0   # 会话记忆持久化（自带 aiosqlite�
 # ============ 向量库 / 文档解析 ============
 chromadb>=0.5.0
 sentence-transformers>=3.0.0
+numpy>=1.26.0          # 论文向量索引（app/papers/search.py）直接使用
 pypdf>=4.3.0
 beautifulsoup4>=4.12.0
 lxml>=5.2.0

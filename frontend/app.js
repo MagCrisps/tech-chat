@@ -1,5 +1,5 @@
 /**
- * 个人技术知识库助手 —— 前端逻辑（原生 JS，无框架、无构建）
+ * CCF-A 论文发现助手 —— 前端逻辑（原生 JS，无框架、无构建）
  *
  * 后端接口契约见 API_DOC.md：
  *   POST /api/chat     SSE 流式问答（status / sources / token / done / error）

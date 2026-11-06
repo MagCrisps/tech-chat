@@ -49,7 +49,6 @@ tech-chat/
 │   ├── build_mini.py       # ④b 按「领域 × 年份」抽取小数据集
 │   └── build_index.py      # ⑤ 建检索索引（SQLite FTS5 + 向量矩阵，增量）
 ├── frontend/               # index.html / style.css / app.js
-├── launcher/               # 桌面启动器（C#，双击打开网页；Windows 自带编译器即可构建）
 ├── data/                   # 个人文档（可选，用于文档问答）
 └── run.py                  # 一行启动
 ```

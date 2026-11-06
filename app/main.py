@@ -74,8 +74,8 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="个人技术知识库聊天助手",
-    description="LangGraph + RAG + FastAPI 的本地知识库问答服务",
+    title="CCF-A 论文发现助手",
+    description="基于 LangGraph + 混合检索的 CCF-A 论文发现与个人文档问答服务",
     version="0.1.0",
     lifespan=lifespan,
 )
