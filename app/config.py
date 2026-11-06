@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     chunk_overlap: int = 200
     retrieval_k: int = 4
 
+    # ---------- 会话记忆 ----------
+    checkpoint_db: str = "./storage/checkpoints.sqlite"  # 多轮对话记忆（SQLite，重启不丢）
+
+    # ---------- 论文检索 ----------
+    paper_dataset_dir: str = "./datasets/ccf_a_mini"  # 数据集：{年份}/{会议名}/papers.jsonl（mini：3 领域 × 2023–2025，2 万篇）
+    paper_index_dir: str = "./storage/paper_index_mini"  # 检索索引（由 pipeline.build_index 生成）
+    paper_search_k: int = 8                           # 每次检索返回给模型的论文数
+
     # ---------- 服务 ----------
     host: str = "127.0.0.1"
     port: int = 8000
@@ -79,6 +87,21 @@ class Settings(BaseSettings):
     def indexed_registry_path(self) -> Path:
         """已入库文件清单（用于增量建库时跳过未变化的文件）。"""
         return self.chroma_persist_path / "indexed_files.json"
+
+    @property
+    def checkpoint_db_path(self) -> Path:
+        """会话记忆 SQLite 文件的绝对路径。"""
+        return self._resolve(self.checkpoint_db)
+
+    @property
+    def paper_dataset_path(self) -> Path:
+        """论文数据集目录的绝对路径。"""
+        return self._resolve(self.paper_dataset_dir)
+
+    @property
+    def paper_index_path(self) -> Path:
+        """论文检索索引目录的绝对路径。"""
+        return self._resolve(self.paper_index_dir)
 
     @property
     def static_dir(self) -> Path:

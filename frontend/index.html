@@ -3,43 +3,161 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>个人技术知识库助手</title>
+  <title>CCF-A 论文发现助手</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236366f1'/%3E%3Cpath d='M9 10h9a5 5 0 0 1 5 5v7H14a5 5 0 0 1-5-5z' fill='white'/%3E%3C/svg%3E" />
+  <script>
+    // 尽早应用主题，避免首屏闪烁
+    (function () {
+      var saved = localStorage.getItem('tech_chat_theme');
+      var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    })();
+  </script>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <div class="app">
-    <!-- 顶部栏 -->
-    <header class="topbar">
+  <!-- SVG 图标集 -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M5 18l-1 3 4-1.5A9 9 0 1 0 5 18z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5M4 20h16"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l2 5.5L19.5 10 14 12l-2 5.5L10 12 4.5 10 10 8.5z"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5v.5"/></symbol>
+  </svg>
+
+  <div class="app" id="app">
+    <!-- ========== 侧边栏 ========== -->
+    <aside class="sidebar" id="sidebar">
       <div class="brand">
-        <span class="logo">📚</span>
-        <div>
-          <h1>个人技术知识库助手</h1>
-          <p class="subtitle">LangGraph · RAG · 流式回答</p>
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M8 9h10a6 6 0 0 1 6 6v8H14a6 6 0 0 1-6-6z"/></svg>
+        </div>
+        <div class="brand-text">
+          <h1>CCF-A 论文发现助手</h1>
+          <p class="subtitle">2 万篇顶会顶刊 · 2023–2025</p>
         </div>
       </div>
-      <div class="actions">
-        <span id="status-dot" class="dot" title="服务状态"></span>
-        <button id="upload-btn" class="btn ghost" type="button">上传文档</button>
-        <button id="new-chat-btn" class="btn" type="button">新对话</button>
-        <input id="file-input" type="file" accept=".md,.markdown,.txt,.pdf,.html,.htm,.rst,.json,.yaml,.yml,.log" hidden />
-      </div>
-    </header>
 
-    <!-- 消息区 -->
-    <main id="messages" class="messages" aria-live="polite">
-      <div class="empty-state" id="empty-state">
-        <h2>开始提问吧</h2>
-        <p>试着问：「什么是任务分解？」「RAG 的检索流程是怎样的？」</p>
-        <p class="hint">寒暄类问题（如「你好」）不会触发知识库检索。</p>
-      </div>
-    </main>
+      <button id="new-chat-btn" class="btn btn-new" type="button" title="新对话（Ctrl + K）">
+        <svg class="icon"><use href="#i-plus"/></svg><span>新对话</span>
+        <kbd>Ctrl K</kbd>
+      </button>
 
-    <!-- 输入区 -->
-    <footer class="composer">
-      <textarea id="input" rows="1" placeholder="输入问题，Enter 发送 / Shift + Enter 换行"></textarea>
-      <button id="send-btn" class="btn primary" type="button">发送</button>
-    </footer>
+      <div class="side-section grow">
+        <div class="side-title">最近会话</div>
+        <ul id="thread-list" class="thread-list"></ul>
+      </div>
+
+      <div class="side-section">
+        <div class="side-title">
+          已入库文档<span class="side-count" id="doc-count">0</span>
+        </div>
+        <ul id="doc-list" class="doc-list"></ul>
+      </div>
+
+      <div class="side-footer">
+        <div class="health" title="服务状态">
+          <span id="status-dot" class="dot"></span>
+          <span id="status-text">连接中…</span>
+        </div>
+        <button id="theme-btn" class="icon-btn" type="button" title="切换深色 / 浅色主题">
+          <svg class="icon icon-sun"><use href="#i-sun"/></svg>
+          <svg class="icon icon-moon"><use href="#i-moon"/></svg>
+        </button>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <!-- ========== 主区域 ========== -->
+    <section class="main" id="main">
+      <header class="topbar">
+        <button id="sidebar-btn" class="icon-btn only-mobile" type="button" title="会话列表">
+          <svg class="icon"><use href="#i-menu"/></svg>
+        </button>
+        <div class="topbar-title" id="thread-title">新对话</div>
+        <div class="actions">
+          <button id="export-btn" class="btn ghost" type="button" title="导出当前对话为 Markdown">
+            <svg class="icon"><use href="#i-download"/></svg><span class="hide-sm">导出</span>
+          </button>
+          <button id="upload-btn" class="btn ghost" type="button" title="上传文档入库">
+            <svg class="icon"><use href="#i-upload"/></svg><span class="hide-sm">上传文档</span>
+          </button>
+          <input id="file-input" type="file" multiple accept=".md,.markdown,.txt,.pdf,.html,.htm,.rst,.json,.yaml,.yml,.log" hidden />
+        </div>
+      </header>
+
+      <main id="messages" class="messages" aria-live="polite">
+        <div class="thread" id="thread"></div>
+      </main>
+
+      <button id="jump-btn" class="jump-btn" type="button" title="回到底部">
+        <svg class="icon"><use href="#i-chevron"/></svg>
+      </button>
+
+      <footer class="composer-wrap">
+        <div class="composer" id="composer">
+          <button id="attach-btn" class="icon-btn" type="button" title="上传文档入库">
+            <svg class="icon"><use href="#i-upload"/></svg>
+          </button>
+          <textarea id="input" rows="1" placeholder="描述你的研究兴趣，例如：用大模型做代码修复…"></textarea>
+          <button id="send-btn" class="send-btn" type="button" title="发送（Enter）" disabled>
+            <svg class="icon icon-send"><use href="#i-send"/></svg>
+            <svg class="icon icon-stop"><use href="#i-stop"/></svg>
+          </button>
+        </div>
+        <div class="composer-hint">
+          <span><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行 · <kbd>Esc</kbd> 停止生成</span>
+          <span class="hide-sm">可直接拖拽文件到页面入库</span>
+        </div>
+      </footer>
+
+      <!-- 拖拽上传遮罩 -->
+      <div class="drop-overlay" id="drop-overlay">
+        <div class="drop-card">
+          <svg class="icon"><use href="#i-upload"/></svg>
+          <p>松开即可上传并入库</p>
+          <span>md · txt · pdf · html · rst · json · yaml · log</span>
+        </div>
+      </div>
+    </section>
   </div>
+
+  <!-- 空状态模板（首次进入 / 新对话时插入 #thread） -->
+  <template id="empty-tpl">
+    <div class="empty-state" id="empty-state">
+      <div class="empty-logo"><svg class="icon"><use href="#i-spark"/></svg></div>
+      <h2>想找哪个方向的论文？</h2>
+      <p>用一句话描述研究兴趣，从 CCF-A 类期刊和会议（人工智能 · 软件工程 · 数据挖掘，2023–2025）中找出相关论文，并说明每篇为什么相关。</p>
+      <div class="suggestions">
+        <button class="suggestion" type="button" data-q="找一些用大语言模型做自动代码修复的论文">
+          <strong>大模型做自动代码修复</strong><span>软件工程 · 人工智能</span>
+        </button>
+        <button class="suggestion" type="button" data-q="2023 年以后 CVPR 和 ICCV 上关于视频生成的工作">
+          <strong>2023 年后 CVPR / ICCV 的视频生成</strong><span>限定年份与会议</span>
+        </button>
+        <button class="suggestion" type="button" data-q="检索增强生成（RAG）中如何减少幻觉，有哪些代表性方法">
+          <strong>RAG 如何减少幻觉</strong><span>方法梳理</span>
+        </button>
+        <button class="suggestion" type="button" data-q="联邦学习中的隐私攻击与防御，只看期刊论文">
+          <strong>联邦学习的隐私攻击与防御</strong><span>只看期刊</span>
+        </button>
+      </div>
+      <p class="hint">可以继续追问来细化结果，例如「只要 2024 年以后的」「只看 ACL」。</p>
+    </div>
+  </template>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="/app.js"></script>
 </body>

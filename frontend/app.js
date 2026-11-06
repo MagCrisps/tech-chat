@@ -1,466 +1,1062 @@
 /**
- * 个人技术知识库助手 —— 前端逻辑（原生 JS）
- * 通过 fetch + ReadableStream 解析后端 SSE，实时渲染 token、状态与来源。
+ * 个人技术知识库助手 —— 前端逻辑（原生 JS，无框架、无构建）
+ *
+ * 后端接口契约见 API_DOC.md：
+ *   POST /api/chat     SSE 流式问答（status / sources / token / done / error）
+ *   POST /api/upload   上传文档并入库
+ *   GET  /api/history  按 thread_id 拉取历史
+ *   GET  /health       健康检查
+ *
+ * 纯前端增强（后端无感知，全部存于 localStorage）：
+ *   tech_chat_thread_id  当前会话 ID（契约要求，保持不变）
+ *   tech_chat_threads    本机会话列表 [{ id, title, updatedAt }]
+ *   tech_chat_docs       本机上传记录 [{ name, chunks, uploadedAt }]
+ *   tech_chat_theme      主题 'light' | 'dark'
  */
 
 const API = {
   chat: '/api/chat',
   upload: '/api/upload',
+  health: '/health',
   history: (id) => `/api/history?thread_id=${encodeURIComponent(id)}`,
 };
 
-const STORAGE_KEY = 'tech_chat_thread_id';
-
-const els = {
-  messages: document.getElementById('messages'),
-  emptyState: document.getElementById('empty-state'),
-  input: document.getElementById('input'),
-  sendBtn: document.getElementById('send-btn'),
-  newChatBtn: document.getElementById('new-chat-btn'),
-  uploadBtn: document.getElementById('upload-btn'),
-  fileInput: document.getElementById('file-input'),
-  statusDot: document.getElementById('status-dot'),
+const KEYS = {
+  thread: 'tech_chat_thread_id',
+  threads: 'tech_chat_threads',
+  docs: 'tech_chat_docs',
+  theme: 'tech_chat_theme',
 };
 
-let threadId = localStorage.getItem(STORAGE_KEY) || createThreadId();
-localStorage.setItem(STORAGE_KEY, threadId);
-let streaming = false;
+const MAX_THREADS = 50;
+const MAX_DOCS = 30;
+const INPUT_MAX_HEIGHT = 160;
+const HEALTH_INTERVAL = 30000;
 
-/* ============================ 工具函数 ============================ */
+const $ = (id) => document.getElementById(id);
 
-/** 生成一个新的会话 ID。 */
+const els = {
+  app: $('app'),
+  messages: $('messages'),
+  thread: $('thread'),
+  input: $('input'),
+  sendBtn: $('send-btn'),
+  newChatBtn: $('new-chat-btn'),
+  uploadBtn: $('upload-btn'),
+  attachBtn: $('attach-btn'),
+  exportBtn: $('export-btn'),
+  fileInput: $('file-input'),
+  statusDot: $('status-dot'),
+  statusText: $('status-text'),
+  threadList: $('thread-list'),
+  threadTitle: $('thread-title'),
+  docList: $('doc-list'),
+  docCount: $('doc-count'),
+  themeBtn: $('theme-btn'),
+  sidebarBtn: $('sidebar-btn'),
+  scrim: $('scrim'),
+  jumpBtn: $('jump-btn'),
+  dropOverlay: $('drop-overlay'),
+  emptyTpl: $('empty-tpl'),
+  toasts: $('toasts'),
+};
+
+const state = {
+  threadId: localStorage.getItem(KEYS.thread) || createThreadId(),
+  streaming: false,
+  controller: null, // 当前流的 AbortController
+  healthy: null, // null = 未知
+  transcript: [], // 当前会话消息 [{ role, content, sources? }]，用于导出
+  loadSeq: 0, // 防止切换会话时历史请求乱序
+};
+localStorage.setItem(KEYS.thread, state.threadId);
+
+/* ============================ 通用工具 ============================ */
+
 function createThreadId() {
-  const rand = Math.random().toString(36).slice(2, 10);
+  const rand = Math.random().toString(36).slice(2, 10).padEnd(8, '0');
   return `thread-${Date.now()}-${rand}`;
 }
 
-/** 设置右上角状态指示灯。 */
-function setStatus(state, title) {
-  els.statusDot.className = `dot ${state || ''}`.trim();
-  if (title) els.statusDot.title = title;
-}
-
-/** 是否已经滚到底部（用于判断要不要自动跟随）。 */
-function nearBottom() {
-  const box = els.messages;
-  return box.scrollHeight - box.scrollTop - box.clientHeight < 160;
-}
-
-/** 滚动到底部。 */
-function scrollToBottom(force = false) {
-  if (force || nearBottom()) {
-    els.messages.scrollTop = els.messages.scrollHeight;
+function readJson(key, fallback) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key));
+    return value ?? fallback;
+  } catch (_) {
+    return fallback;
   }
 }
 
-/** HTML 转义，防止注入。 */
+function writeJson(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
 function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (c) => (
+  return String(text ?? '').replace(/[&<>"']/g, (c) => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
   ));
 }
 
-/** 行内 Markdown（粗体 / 行内代码）。 */
-function renderInline(text) {
-  return text
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>');
+function icon(name, cls = '') {
+  return `<svg class="icon ${cls}"><use href="#i-${name}"/></svg>`;
 }
 
-/** 轻量 Markdown 渲染（标题 / 列表 / 引用 / 代码块 / 加粗）。 */
+function el(tag, className, html) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (html !== undefined) node.innerHTML = html;
+  return node;
+}
+
+function relativeTime(ts) {
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)} 天前`;
+  return new Date(ts).toLocaleDateString('zh-CN');
+}
+
+function toast(message, type = '') {
+  const node = el('div', `toast ${type}`.trim());
+  node.textContent = message;
+  els.toasts.appendChild(node);
+  setTimeout(() => {
+    node.classList.add('out');
+    node.addEventListener('animationend', () => node.remove(), { once: true });
+  }, 2600);
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const area = el('textarea');
+    area.value = text;
+    area.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+  }
+}
+
+/** 复制后按钮短暂显示「已复制」。 */
+function flashCopied(button) {
+  const original = button.innerHTML;
+  button.innerHTML = `${icon('check')}<span>已复制</span>`;
+  setTimeout(() => { if (button.isConnected) button.innerHTML = original; }, 1500);
+}
+
+/* ============================ 状态指示灯 ============================ */
+
+function setStatus(kind, text) {
+  els.statusDot.className = `dot ${kind || ''}`.trim();
+  els.statusDot.title = text;
+  els.statusText.textContent = text;
+}
+
+/** 根据健康状态恢复指示灯（流式生成时由 busy 覆盖）。 */
+function refreshStatus() {
+  if (state.streaming) return setStatus('busy', '正在生成回答…');
+  if (state.healthy === null) return setStatus('', '连接中…');
+  return state.healthy ? setStatus('ok', '服务就绪') : setStatus('error', '无法连接服务');
+}
+
+async function checkHealth() {
+  try {
+    const res = await fetch(API.health, { cache: 'no-store' });
+    const data = await res.json();
+    state.healthy = res.ok && data.status === 'ok';
+  } catch (_) {
+    state.healthy = false;
+  }
+  refreshStatus();
+}
+
+/* ============================ Markdown 渲染 ============================ */
+/*
+ * 轻量渲染器：围栏代码块（带语言与复制按钮）、标题、有序/无序列表（支持缩进嵌套）、
+ * 引用块、表格、分割线、加粗、斜体、删除线、行内代码、链接（仅 http/https/相对路径）。
+ * 所有文本先 escapeHtml 再套标签，杜绝注入。
+ */
+
+const INLINE_TOKEN = '\u0000';
+
+function renderInline(text) {
+  const stash = [];
+  const keep = (html) => `${INLINE_TOKEN}${stash.push(html) - 1}${INLINE_TOKEN}`;
+
+  let out = escapeHtml(text.replaceAll(INLINE_TOKEN, ''));
+  out = out.replace(/`([^`]+)`/g, (_, code) => keep(`<code>${code}</code>`));
+  out = out.replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/|#)[^\s)]*)\)/g,
+    (_, label, url) => keep(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`));
+  out = out
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/~~(.+?)~~/g, '<del>$1</del>')
+    .replace(/(^|[^*\w])\*(?!\s)([^*]+?)\*(?!\*)/g, '$1<em>$2</em>');
+  return out.replace(new RegExp(`${INLINE_TOKEN}(\\d+)${INLINE_TOKEN}`, 'g'), (_, i) => stash[i]);
+}
+
+function renderCodeBlock(code, lang) {
+  return '<div class="code-block">'
+    + `<div class="code-head"><span>${escapeHtml(lang || 'code')}</span>`
+    + `<button class="copy-code" type="button">${icon('copy')}<span>复制</span></button></div>`
+    + `<pre><code>${escapeHtml(code)}</code></pre></div>`;
+}
+
+const TABLE_SEP = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/;
+
+function splitRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+}
+
+function renderTable(rows) {
+  const [head, , ...body] = rows;
+  const th = splitRow(head).map((c) => `<th>${renderInline(c)}</th>`).join('');
+  const tb = body.map((r) => `<tr>${splitRow(r).map((c) => `<td>${renderInline(c)}</td>`).join('')}</tr>`).join('');
+  return `<div class="table-wrap"><table><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table></div>`;
+}
+
 function renderMarkdown(source) {
   if (!source) return '';
-  const segments = escapeHtml(source).split('```');
+  const lines = String(source).replace(/\r\n?/g, '\n').split('\n');
   let html = '';
-  segments.forEach((segment, index) => {
-    if (index % 2 === 1) {
-      const newline = segment.indexOf('\n');
-      const code = newline >= 0 ? segment.slice(newline + 1) : segment;
-      html += `<pre><code>${code.replace(/\n+$/, '')}</code></pre>`;
-      return;
+  let para = [];
+  const lists = []; // 栈：{ type, indent }
+
+  const flushPara = () => {
+    if (para.length) html += `<p>${para.map(renderInline).join('<br>')}</p>`;
+    para = [];
+  };
+  const closeLists = (toIndent = -1) => {
+    while (lists.length && lists[lists.length - 1].indent > toIndent) {
+      html += `</li></${lists.pop().type}>`;
     }
-    html += renderBlocks(segment);
-  });
-  return html;
-}
+  };
+  const flushAll = () => { flushPara(); closeLists(); };
 
-/** 块级元素渲染。 */
-function renderBlocks(text) {
-  const lines = text.split('\n');
-  let html = '';
-  let list = null;
-  const closeList = () => { if (list) { html += `</${list}>`; list = null; } };
-
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i];
     const line = raw.trim();
-    if (!line) { closeList(); continue; }
 
-    let m = line.match(/^#{1,6}\s+(.*)$/);
-    if (m) { closeList(); html += `<h4>${renderInline(m[1])}</h4>`; continue; }
-
-    m = line.match(/^[-*+]\s+(.*)$/);
-    if (m) {
-      if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; }
-      html += `<li>${renderInline(m[1])}</li>`;
+    // 围栏代码块（未闭合时也渲染，适配流式输出）
+    const fence = line.match(/^(`{3,}|~{3,})\s*([\w+#.-]*)/);
+    if (fence) {
+      flushAll();
+      const marker = fence[1];
+      const body = [];
+      i += 1;
+      while (i < lines.length && !lines[i].trim().startsWith(marker)) {
+        body.push(lines[i]);
+        i += 1;
+      }
+      html += renderCodeBlock(body.join('\n'), fence[2]);
       continue;
     }
 
-    m = line.match(/^\d+[.)]\s+(.*)$/);
+    if (!line) { flushAll(); continue; }
+
+    let m = line.match(/^(#{1,6})\s+(.*)$/);
     if (m) {
-      if (list !== 'ol') { closeList(); html += '<ol>'; list = 'ol'; }
-      html += `<li>${renderInline(m[1])}</li>`;
+      flushAll();
+      html += `<h${m[1].length}>${renderInline(m[2])}</h${m[1].length}>`;
       continue;
     }
 
-    m = line.match(/^>\s?(.*)$/);
-    if (m) { closeList(); html += `<blockquote>${renderInline(m[1])}</blockquote>`; continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line)) { flushAll(); html += '<hr>'; continue; }
 
-    closeList();
-    html += `<p>${renderInline(line)}</p>`;
+    if (line.startsWith('|') && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1].trim())) {
+      flushAll();
+      const rows = [];
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        rows.push(lines[i]);
+        i += 1;
+      }
+      i -= 1;
+      html += renderTable(rows);
+      continue;
+    }
+
+    if (line.startsWith('>')) {
+      flushAll();
+      const quote = [];
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        quote.push(lines[i].trim().replace(/^>\s?/, ''));
+        i += 1;
+      }
+      i -= 1;
+      html += `<blockquote>${renderMarkdown(quote.join('\n'))}</blockquote>`;
+      continue;
+    }
+
+    m = raw.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (m) {
+      flushPara();
+      const indent = m[1].replace(/\t/g, '    ').length;
+      const type = /\d/.test(m[2]) ? 'ol' : 'ul';
+      closeLists(indent);
+      const top = lists[lists.length - 1];
+      if (top && top.indent === indent && top.type !== type) {
+        html += `</li></${lists.pop().type}>`;
+      }
+      const current = lists[lists.length - 1];
+      if (!current || indent > current.indent) {
+        const start = type === 'ol' ? parseInt(m[2], 10) : 1;
+        html += type === 'ol' && start !== 1 ? `<ol start="${start}">` : `<${type}>`;
+        lists.push({ type, indent });
+      } else {
+        html += '</li>';
+      }
+      html += `<li>${renderInline(m[3])}`;
+      continue;
+    }
+
+    // 列表项的续行
+    if (lists.length && /^\s/.test(raw)) { html += `<br>${renderInline(line)}`; continue; }
+
+    closeLists();
+    para.push(line);
   }
-  closeList();
+  flushAll();
   return html;
 }
 
-/* ============================ DOM 构建 ============================ */
+/* ============================ 滚动 ============================ */
 
-/** 隐藏空状态占位。 */
-function hideEmptyState() {
-  if (els.emptyState) els.emptyState.style.display = 'none';
+function nearBottom() {
+  const box = els.messages;
+  return box.scrollHeight - box.scrollTop - box.clientHeight < 120;
 }
 
-/** 创建一条消息行，返回内部引用。 */
+function scrollToBottom(smooth = false) {
+  els.messages.scrollTo({ top: els.messages.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+}
+
+/** 先判断是否贴底，再执行 DOM 更新，最后按需跟随滚动。 */
+function withAutoScroll(update) {
+  const stick = nearBottom();
+  update();
+  if (stick) scrollToBottom();
+}
+
+/* ============================ 消息 DOM ============================ */
+
+function showEmptyState() {
+  els.thread.innerHTML = '';
+  els.thread.appendChild(els.emptyTpl.content.cloneNode(true));
+}
+
+/** 本机列表里有该会话、但服务端没有历史（如旧版内存记忆在重启后被清空）。 */
+function showMissingState() {
+  const id = state.threadId;
+  const box = el('div', 'empty-state missing',
+    `<div class="empty-logo">${icon('alert')}</div>`
+    + '<h2>这段对话的记录找不到了</h2>'
+    + '<p>服务端没有这个会话的历史，可能是此前服务重启时记忆被清空。<br>'
+    + '你仍可以在这里继续提问，或将它从列表中移除。</p>'
+    + '<div class="missing-actions">'
+    + `<button class="btn" type="button" data-act="remove">${icon('trash')}<span>从列表移除</span></button>`
+    + `<button class="btn" type="button" data-act="new">${icon('plus')}<span>开始新对话</span></button>`
+    + '</div>');
+  box.id = 'empty-state';
+  box.querySelector('[data-act="remove"]').addEventListener('click', () => removeThread(id));
+  box.querySelector('[data-act="new"]').addEventListener('click', startNewChat);
+  els.thread.innerHTML = '';
+  els.thread.appendChild(box);
+}
+
+function hideEmptyState() {
+  const empty = $('empty-state');
+  if (empty) empty.remove();
+}
+
 function createRow(role) {
   hideEmptyState();
-  const row = document.createElement('div');
-  row.className = `row ${role}`;
-
-  const avatar = document.createElement('div');
-  avatar.className = 'avatar';
-  avatar.textContent = role === 'user' ? '🙋' : '🤖';
-
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-
-  row.append(avatar, bubble);
-  els.messages.appendChild(row);
-  scrollToBottom(true);
-  return { row, bubble };
+  const row = el('div', `row ${role}`);
+  if (role === 'assistant') row.appendChild(el('div', 'avatar', icon('spark')));
+  const msg = el('div', 'msg');
+  const bubble = el('div', 'bubble');
+  msg.appendChild(bubble);
+  row.appendChild(msg);
+  els.thread.appendChild(row);
+  return { row, msg, bubble };
 }
 
-/** 追加用户消息。 */
+/** 消息下方的操作栏（复制 + 可选的附加信息）。 */
+function addActions(msg, getText, meta) {
+  const bar = el('div', 'msg-actions');
+  const copyBtn = el('button', 'msg-action', `${icon('copy')}<span>复制</span>`);
+  copyBtn.type = 'button';
+  copyBtn.addEventListener('click', async () => {
+    await copyText(getText());
+    flashCopied(copyBtn);
+  });
+  bar.appendChild(copyBtn);
+  if (meta) bar.appendChild(el('span', 'msg-action', escapeHtml(meta)));
+  msg.appendChild(bar);
+}
+
 function addUserMessage(text) {
-  const { bubble } = createRow('user');
+  const { msg, bubble } = createRow('user');
   bubble.textContent = text;
+  addActions(msg, () => text);
 }
 
-/**
- * 创建「回答中」的占位气泡。
- * @returns {{bubble: HTMLElement, setStatus: Function, appendToken: Function,
- *            setSources: Function, setError: Function, finish: Function}}
- */
-function createAssistantMessage() {
-  const { bubble } = createRow('assistant');
+function addAssistantStatic(content) {
+  const { msg, bubble } = createRow('assistant');
+  bubble.appendChild(el('div', 'content', renderMarkdown(content)));
+  addActions(msg, () => content);
+}
 
-  const status = document.createElement('div');
-  status.className = 'status';
-  status.innerHTML = '<span class="spinner"></span><span class="status-text">正在思考…</span>';
-  bubble.appendChild(status);
+const INLINE_TAGS = new Set(['STRONG', 'EM', 'A', 'CODE', 'BR', 'DEL', 'SPAN', 'SVG', 'BUTTON']);
+
+/** 找到正文最后一个块级元素，让打字光标紧跟在文字后面。 */
+function cursorHost(root) {
+  let node = root;
+  for (;;) {
+    const child = node.lastElementChild;
+    if (!child) break;
+    if (child.tagName === 'PRE') { node = child.firstElementChild || child; break; }
+    if (INLINE_TAGS.has(child.tagName.toUpperCase())) break;
+    node = child;
+  }
+  return node;
+}
+
+function renderSources(sources) {
+  if (sources.every((s) => s.kind === 'paper')) return renderPapers(sources);
+  const details = el('details', 'sources');
+  const names = [...new Set(sources.map((s) => s.file_name || '未知文件'))];
+  const chips = names.slice(0, 3).map((n) => `<span class="source-chip">${escapeHtml(n)}</span>`).join('')
+    + (names.length > 3 ? `<span class="source-chip">+${names.length - 3}</span>` : '');
+  details.innerHTML = `<summary>${icon('chevron', 'chev')}`
+    + `<span class="sources-title">引用来源（${sources.length}）</span>`
+    + `<span class="source-chips">${chips}</span></summary>`;
+
+  const list = el('div', 'source-list');
+  sources.forEach((item, index) => {
+    const box = el('div', 'source-item');
+    box.innerHTML = '<div class="source-head">'
+      + `<span class="idx">${index + 1}</span>${icon('file')}`
+      + `<span>${escapeHtml(item.file_name || '未知文件')}</span>`
+      + `<span class="pos">chunk 起始位置 ${escapeHtml(item.start_index ?? 0)}</span></div>`;
+    const preview = el('div', 'source-preview');
+    preview.textContent = item.preview || '（无预览内容）';
+    preview.title = '点击展开 / 收起';
+    preview.addEventListener('click', () => preview.classList.toggle('expanded'));
+    box.appendChild(preview);
+    list.appendChild(box);
+  });
+  details.appendChild(list);
+  return details;
+}
+
+/** 论文检索结果：默认展开的论文卡片列表（编号与回答中的 [Pn] 对应）。 */
+function renderPapers(papers) {
+  const details = el('details', 'sources papers');
+  details.open = true;
+  const venues = [...new Set(papers.map((p) => p.venue))];
+  const chips = venues.slice(0, 4).map((v) => `<span class="source-chip">${escapeHtml(v)}</span>`).join('')
+    + (venues.length > 4 ? `<span class="source-chip">+${venues.length - 4}</span>` : '');
+  details.innerHTML = `<summary>${icon('chevron', 'chev')}`
+    + `<span class="sources-title">检索到的论文（${papers.length}）</span>`
+    + `<span class="source-chips">${chips}</span></summary>`;
+
+  const list = el('div', 'source-list');
+  papers.forEach((p, index) => {
+    const card = el('div', 'source-item paper-item');
+    const scholar = `https://scholar.google.com/scholar?q=${encodeURIComponent(`"${p.title}"`)}`;
+    card.innerHTML = '<div class="paper-head">'
+      + `<span class="idx">P${index + 1}</span><span class="paper-title"></span></div>`
+      + '<div class="paper-meta">'
+      + `<span class="badge venue">${escapeHtml(p.venue)}</span>`
+      + `<span class="badge">${escapeHtml(p.year)}</span>`
+      + `<span class="badge">${p.type === 'journal' ? '期刊' : '会议'}</span>`
+      + `<span class="badge muted">${escapeHtml(p.category || '')}</span>`
+      + `<a class="paper-link" href="${scholar}" target="_blank" rel="noopener noreferrer">搜索全文</a></div>`;
+    card.querySelector('.paper-title').textContent = p.title;
+    const preview = el('div', 'source-preview');
+    preview.textContent = p.preview || '（暂无摘要）';
+    preview.title = '点击展开 / 收起';
+    preview.addEventListener('click', () => preview.classList.toggle('expanded'));
+    card.appendChild(preview);
+    list.appendChild(card);
+  });
+  details.appendChild(list);
+  return details;
+}
+
+/** 创建流式回答的助手气泡，返回控制器。 */
+function createAssistantMessage(record) {
+  const { msg, bubble } = createRow('assistant');
+  const startedAt = performance.now();
+
+  const status = el('div', 'status',
+    '<span class="typing"><i></i><i></i><i></i></span><span class="status-text">正在思考…</span>');
   const statusText = status.querySelector('.status-text');
+  bubble.appendChild(status);
 
-  const body = document.createElement('div');
-  body.className = 'content';
-  body.style.display = 'none';
-  bubble.appendChild(body);
-
+  const body = el('div', 'content');
+  const cursor = el('span', 'cursor');
   let raw = '';
-  let cursor = null;
+  let retrieved = false;
+  let started = false;
+  let finished = false;
+  let frame = 0;
+
+  const paint = () => {
+    frame = 0;
+    withAutoScroll(() => {
+      body.innerHTML = renderMarkdown(raw);
+      if (!finished) cursorHost(body).appendChild(cursor);
+    });
+  };
 
   return {
-    bubble,
-    setStatus(text) {
-      status.querySelector('.spinner').style.display = '';
-      statusText.textContent = text;
-      scrollToBottom();
-    },
-    setStage(text) {
-      status.querySelector('.spinner').style.display = 'none';
-      statusText.textContent = text;
+    setStatus(stage, text) {
+      if (stage === 'retrieving') retrieved = true;
+      if (!started) withAutoScroll(() => { statusText.textContent = text; });
     },
     appendToken(token) {
-      if (raw === '') {
+      if (!token) return;
+      if (!started) {
+        started = true;
         status.remove();
-        body.style.display = '';
-        cursor = document.createElement('span');
-        cursor.className = 'cursor';
-        body.after(cursor);
+        if (retrieved) {
+          bubble.appendChild(el('div', 'stage-steps',
+            `<span class="stage-step">${icon('check')}已检索知识库</span>`));
+        }
+        bubble.appendChild(body);
       }
       raw += token;
-      body.innerHTML = renderMarkdown(raw);
-      scrollToBottom();
+      record.content = raw;
+      if (!frame) frame = requestAnimationFrame(paint);
     },
     setSources(sources) {
       if (!sources || !sources.length) return;
-      const wrap = document.createElement('div');
-      wrap.className = 'sources';
-      const title = document.createElement('div');
-      title.className = 'sources-title';
-      title.textContent = `引用来源（${sources.length}）`;
-      wrap.appendChild(title);
-
-      for (const item of sources) {
-        const box = document.createElement('div');
-        box.className = 'source-item';
-        const head = document.createElement('div');
-        head.className = 'source-head';
-        head.textContent = `📄 ${item.file_name || '未知文件'} · chunk 起始位置 ${item.start_index ?? 0}`;
-        const preview = document.createElement('div');
-        preview.className = 'source-preview';
-        preview.textContent = item.preview || '';
-        box.append(head, preview);
-        wrap.appendChild(box);
-      }
-      bubble.appendChild(wrap);
-      scrollToBottom();
+      record.sources = sources;
+      withAutoScroll(() => bubble.appendChild(renderSources(sources)));
     },
     setError(message) {
-      status.remove();
-      bubble.classList.add('error');
-      bubble.textContent = message;
-      scrollToBottom();
+      withAutoScroll(() => {
+        status.remove();
+        const box = el('div', 'bubble error', `${icon('alert')}<span></span>`);
+        box.querySelector('span').textContent = message;
+        if (started) {
+          bubble.appendChild(box);
+        } else {
+          bubble.className = box.className;
+          bubble.innerHTML = box.innerHTML;
+        }
+      });
+      this.finish({ silent: true });
     },
-    finish() {
-      if (cursor) { cursor.remove(); cursor = null; }
-      status.remove();
+    finish({ note, silent } = {}) {
+      if (finished) return;
+      finished = true;
+      if (frame) cancelAnimationFrame(frame);
+      if (started) paint();
+      cursor.remove();
+      if (!started && !silent) {
+        status.classList.add('idle');
+        status.querySelector('.typing')?.remove();
+        statusText.textContent = note || '（本次没有返回内容）';
+      } else if (note) {
+        bubble.appendChild(el('div', 'stage-steps', `<span class="stage-step">${escapeHtml(note)}</span>`));
+      }
+      if (started) {
+        const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+        addActions(msg, () => raw, `用时 ${seconds}s`);
+      }
     },
-    hasContent() { return raw !== ''; },
   };
 }
 
-/* ============================ 流式请求 ============================ */
+/* ============================ 流式问答 ============================ */
 
-/**
- * 解析一行 SSE 数据。
- * @param {string} block 以空行分隔的数据块
- * @returns {object|null} 解析后的 JSON 负载
- */
 function parseSseBlock(block) {
-  const dataLines = block
+  const data = block
     .split('\n')
     .filter((line) => line.startsWith('data:'))
     .map((line) => line.slice(5).trim());
-  if (!dataLines.length) return null;
+  if (!data.length) return null;
   try {
-    return JSON.parse(dataLines.join('\n'));
+    return JSON.parse(data.join('\n'));
   } catch (err) {
     console.warn('SSE 数据解析失败：', err, block);
     return null;
   }
 }
 
-/** 发送一条消息并流式渲染回答。 */
+function setStreaming(on) {
+  state.streaming = on;
+  els.sendBtn.classList.toggle('stop', on);
+  els.sendBtn.title = on ? '停止生成（Esc）' : '发送（Enter）';
+  updateSendState();
+  refreshStatus();
+}
+
+function updateSendState() {
+  els.sendBtn.disabled = !state.streaming && !els.input.value.trim();
+}
+
+function stopStreaming() {
+  if (state.controller) state.controller.abort();
+}
+
 async function sendMessage(text) {
-  if (streaming) return;
-  streaming = true;
-  els.sendBtn.disabled = true;
-  setStatus('busy', '正在生成回答…');
+  if (state.streaming) return;
+  const threadAtStart = state.threadId;
+  const controller = new AbortController();
+  state.controller = controller;
+  setStreaming(true);
 
   addUserMessage(text);
-  const view = createAssistantMessage();
-  let gotSources = false;
+  state.transcript.push({ role: 'user', content: text });
+  const record = { role: 'assistant', content: '' };
+  state.transcript.push(record);
+  touchThread(threadAtStart, text);
+  scrollToBottom(true);
+
+  const view = createAssistantMessage(record);
+  let failed = false;
 
   try {
-    const response = await fetch(API.chat, {
+    const res = await fetch(API.chat, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ thread_id: threadId, message: text }),
+      body: JSON.stringify({ thread_id: threadAtStart, message: text }),
+      signal: controller.signal,
     });
 
-    if (!response.ok || !response.body) {
-      let detail = `请求失败（HTTP ${response.status}）`;
+    if (!res.ok || !res.body) {
+      let detail = `请求失败（HTTP ${res.status}）`;
       try {
-        const data = await response.json();
-        if (data && data.error) detail = data.error;
-      } catch (_) { /* 忽略非 JSON 响应 */ }
+        const data = await res.json();
+        detail = data.error || data.detail || detail;
+        if (typeof detail !== 'string') detail = JSON.stringify(detail);
+      } catch (_) { /* 非 JSON 响应 */ }
       throw new Error(detail);
     }
 
-    const reader = response.body.getReader();
+    const reader = res.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
 
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
       const blocks = buffer.split('\n\n');
-      buffer = blocks.pop(); // 最后一段可能不完整，留到下一轮
+      buffer = blocks.pop(); // 末段可能不完整，留到下一轮
 
       for (const block of blocks) {
-        const payload = parseSseBlock(block);
-        if (!payload) continue;
-        handleEvent(payload, view, () => { gotSources = true; });
+        const event = parseSseBlock(block);
+        if (!event) continue;
+        switch (event.type) {
+          case 'status':
+            view.setStatus(event.stage, event.message || '处理中…');
+            break;
+          case 'sources':
+            view.setSources(event.sources);
+            break;
+          case 'token':
+            view.appendToken(event.content || '');
+            break;
+          case 'error':
+            failed = true;
+            view.setError(event.message || '服务异常');
+            break;
+          case 'done':
+            view.finish();
+            break;
+          default:
+            break;
+        }
       }
     }
-
     view.finish();
-    if (!view.hasContent() && !gotSources) {
-      view.setStage('（本次没有返回内容）');
-    }
-    setStatus('ok', '就绪');
+    if (!failed) state.healthy = true;
   } catch (error) {
-    console.error(error);
-    view.setError(`出错了：${error.message}。请检查后端服务与 .env 配置后重试。`);
-    setStatus('error', '请求失败');
+    if (error.name === 'AbortError') {
+      view.finish({ note: '已停止生成' });
+    } else {
+      console.error(error);
+      failed = true;
+      const offline = error instanceof TypeError;
+      if (offline) state.healthy = false;
+      view.setError(offline
+        ? '无法连接后端服务，请确认服务已启动（python run.py）后重试。'
+        : `出错了：${error.message}。请检查后端服务与 .env 配置后重试。`);
+    }
   } finally {
-    streaming = false;
-    els.sendBtn.disabled = false;
-    els.input.focus();
+    if (state.controller === controller) state.controller = null;
+    setStreaming(false);
+    if (failed) setStatus('error', '请求失败');
+    if (state.threadId === threadAtStart) els.input.focus();
   }
 }
 
-/** 处理单条 SSE 事件。 */
-function handleEvent(payload, view, markSources) {
-  switch (payload.type) {
-    case 'status':
-      view.setStatus(payload.message || '处理中…');
-      break;
-    case 'sources':
-      markSources();
-      view.setSources(payload.sources);
-      break;
-    case 'token':
-      view.appendToken(payload.content || '');
-      break;
-    case 'error':
-      view.setError(payload.message || '服务异常');
-      setStatus('error', '服务异常');
-      break;
-    case 'done':
-      view.finish();
-      break;
-    default:
-      break;
-  }
+function submitInput() {
+  const text = els.input.value.trim();
+  if (!text || state.streaming) return;
+  els.input.value = '';
+  autoGrow();
+  sendMessage(text);
 }
 
 /* ============================ 会话管理 ============================ */
 
-/** 加载当前 thread 的历史消息。 */
-async function loadHistory() {
-  try {
-    const response = await fetch(API.history(threadId));
-    if (!response.ok) return;
-    const data = await response.json();
-    const messages = data.messages || [];
-    if (!messages.length) return;
+function getThreads() {
+  return readJson(KEYS.threads, []);
+}
 
-    hideEmptyState();
-    for (const item of messages) {
-      if (item.role === 'user') {
-        addUserMessage(item.content);
-      } else {
-        const { bubble } = createRow('assistant');
-        const body = document.createElement('div');
-        body.className = 'content';
-        body.innerHTML = renderMarkdown(item.content);
-        bubble.appendChild(body);
-      }
-    }
-    scrollToBottom(true);
-  } catch (error) {
-    console.warn('加载历史失败：', error);
+/** 记录 / 更新本机会话列表（标题取首条用户提问）。 */
+function touchThread(id, firstText) {
+  const threads = getThreads();
+  let item = threads.find((t) => t.id === id);
+  if (!item) {
+    item = { id, title: (firstText || '新对话').replace(/\s+/g, ' ').slice(0, 40) };
+    threads.unshift(item);
+  }
+  item.updatedAt = Date.now();
+  threads.sort((a, b) => b.updatedAt - a.updatedAt);
+  writeJson(KEYS.threads, threads.slice(0, MAX_THREADS));
+  renderThreads();
+}
+
+function renderThreads() {
+  const threads = getThreads();
+  const current = threads.find((t) => t.id === state.threadId);
+  els.threadTitle.textContent = current ? current.title : '新对话';
+  els.threadList.innerHTML = '';
+  if (!threads.length) {
+    els.threadList.appendChild(el('li', 'side-empty', '还没有会话记录'));
+    return;
+  }
+  for (const t of threads) {
+    const li = el('li', `thread-item${t.id === state.threadId ? ' active' : ''}`);
+    li.title = `${t.title}\n${relativeTime(t.updatedAt)}`;
+    li.innerHTML = `${icon('chat')}<span class="name"></span>`
+      + `<button class="del" type="button" title="从列表移除">${icon('trash')}</button>`;
+    li.querySelector('.name').textContent = t.title;
+    li.addEventListener('click', () => switchThread(t.id));
+    li.querySelector('.del').addEventListener('click', (e) => {
+      e.stopPropagation();
+      removeThread(t.id);
+    });
+    els.threadList.appendChild(li);
   }
 }
 
-/** 开始新对话：清空历史并重新生成 thread_id。 */
-async function startNewChat() {
-  threadId = createThreadId();
-  localStorage.setItem(STORAGE_KEY, threadId);
-  els.messages.innerHTML = '';
-  const placeholder = document.createElement('div');
-  placeholder.className = 'empty-state';
-  placeholder.id = 'empty-state';
-  placeholder.innerHTML =
-    '<h2>开始提问吧</h2>' +
-    '<p>试着问：「什么是任务分解？」「RAG 的检索流程是怎样的？」</p>' +
-    '<p class="hint">寒暄类问题（如「你好」）不会触发知识库检索。</p>';
-  els.messages.appendChild(placeholder);
-  els.emptyState = placeholder;
-  setStatus('ok', '就绪');
+function removeThread(id) {
+  writeJson(KEYS.threads, getThreads().filter((t) => t.id !== id));
+  if (id === state.threadId) {
+    startNewChat();
+  } else {
+    renderThreads();
+  }
+  toast('已从本机列表移除');
+}
+
+async function loadHistory() {
+  const seq = ++state.loadSeq;
+  const id = state.threadId;
+  try {
+    const res = await fetch(API.history(id));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (seq !== state.loadSeq) return; // 已切换到别的会话
+    const messages = (data.messages || []).filter((m) => m.content);
+    state.transcript = messages.map((m) => ({ role: m.role, content: m.content }));
+    if (!messages.length) {
+      if (getThreads().some((t) => t.id === id)) showMissingState();
+      else showEmptyState();
+      return;
+    }
+
+    els.thread.innerHTML = '';
+    for (const item of messages) {
+      if (item.role === 'user') addUserMessage(item.content);
+      else addAssistantStatic(item.content);
+    }
+    const firstUser = messages.find((m) => m.role === 'user');
+    if (!getThreads().some((t) => t.id === id)) touchThread(id, firstUser && firstUser.content);
+    scrollToBottom();
+  } catch (error) {
+    if (seq !== state.loadSeq) return;
+    console.warn('加载历史失败：', error);
+    showEmptyState();
+    toast('历史记录加载失败', 'error');
+  }
+}
+
+function setThread(id) {
+  state.threadId = id;
+  state.transcript = [];
+  localStorage.setItem(KEYS.thread, id);
+  renderThreads();
+  closeSidebar();
+}
+
+function startNewChat() {
+  stopStreaming();
+  state.loadSeq += 1;
+  setThread(createThreadId());
+  showEmptyState();
   els.input.focus();
 }
 
-/* ============================ 文件上传 ============================ */
+function switchThread(id) {
+  if (id === state.threadId) { closeSidebar(); return; }
+  stopStreaming();
+  setThread(id);
+  els.thread.innerHTML = '';
+  loadHistory();
+}
 
-/** 上传文件并入库。 */
+/* ============================ 导出 ============================ */
+
+function exportChat() {
+  const items = state.transcript.filter((m) => m.content);
+  if (!items.length) { toast('当前对话还没有内容'); return; }
+
+  const title = els.threadTitle.textContent;
+  let md = `# ${title}\n\n> 导出时间：${new Date().toLocaleString('zh-CN')}　会话 ID：\`${state.threadId}\`\n\n`;
+  for (const m of items) {
+    md += m.role === 'user' ? '## 🙋 提问\n\n' : '## 🤖 回答\n\n';
+    md += `${m.content.trim()}\n\n`;
+    if (m.sources && m.sources.length) {
+      md += '**引用来源**\n\n';
+      m.sources.forEach((s, i) => {
+        md += s.kind === 'paper'
+          ? `${i + 1}. [P${i + 1}] ${s.title}（${s.venue} ${s.year}）\n`
+          : `${i + 1}. ${s.file_name || '未知文件'}（chunk 起始位置 ${s.start_index ?? 0}）\n`;
+      });
+      md += '\n';
+    }
+  }
+  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+  const a = el('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 40) || '对话'}.md`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast('已导出为 Markdown');
+}
+
+/* ============================ 上传 ============================ */
+
+function renderDocs() {
+  const docs = readJson(KEYS.docs, []);
+  els.docCount.textContent = docs.length;
+  els.docList.innerHTML = '';
+  if (!docs.length) {
+    els.docList.appendChild(el('li', 'side-empty', '上传后的文档会显示在这里'));
+    return;
+  }
+  for (const d of docs) {
+    const li = el('li', 'doc-item', `${icon('file')}<span class="name"></span><span class="meta"></span>`);
+    li.querySelector('.name').textContent = d.name;
+    li.querySelector('.meta').textContent = `${d.chunks ?? '?'} 片段`;
+    li.title = `${d.name} · ${relativeTime(d.uploadedAt)}入库`;
+    els.docList.appendChild(li);
+  }
+}
+
+function rememberDoc(name, chunks) {
+  const docs = readJson(KEYS.docs, []).filter((d) => d.name !== name);
+  docs.unshift({ name, chunks, uploadedAt: Date.now() });
+  writeJson(KEYS.docs, docs.slice(0, MAX_DOCS));
+  renderDocs();
+}
+
 async function uploadFile(file) {
+  const { bubble } = createRow('system');
+  bubble.className = 'notice';
+  bubble.innerHTML = '<span class="spinner"></span><span></span>';
+  bubble.lastChild.textContent = `正在处理《${file.name}》…`;
+  scrollToBottom(true);
+
   const form = new FormData();
   form.append('file', file);
-  setStatus('busy', `正在上传 ${file.name} …`);
-
-  const { bubble } = createRow('assistant');
-  bubble.appendChild(Object.assign(document.createElement('div'), {
-    className: 'tool-line',
-    textContent: `⏳ 正在处理《${file.name}》…`,
-  }));
-
   try {
-    const response = await fetch(API.upload, { method: 'POST', body: form });
-    const data = await response.json();
-    if (!response.ok || data.error) {
-      throw new Error(data.error || `HTTP ${response.status}`);
-    }
-    bubble.innerHTML = '';
-    bubble.appendChild(Object.assign(document.createElement('div'), {
-      className: 'tool-line',
-      textContent: `✅ ${data.message || '入库成功'}`,
-    }));
-    setStatus('ok', '就绪');
+    const res = await fetch(API.upload, { method: 'POST', body: form });
+    let data = {};
+    try { data = await res.json(); } catch (_) { /* 非 JSON */ }
+    if (!res.ok || data.error) throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+
+    bubble.className = 'notice ok';
+    bubble.innerHTML = `${icon('check')}<span></span>`;
+    bubble.lastChild.textContent = data.message || `《${file.name}》已入库`;
+    rememberDoc(data.file_name || file.name, data.chunks);
+    toast(`《${data.file_name || file.name}》入库成功`);
   } catch (error) {
-    bubble.classList.add('error');
-    bubble.textContent = `上传失败：${error.message}`;
-    setStatus('error', '上传失败');
+    const message = error instanceof TypeError ? '无法连接后端服务' : error.message;
+    bubble.className = 'notice error';
+    bubble.innerHTML = `${icon('alert')}<span></span>`;
+    bubble.lastChild.textContent = message.startsWith('上传失败') ? message : `上传失败：${message}`;
+    toast('上传失败', 'error');
   }
+}
+
+async function uploadFiles(files) {
+  for (const file of files) await uploadFile(file); // 逐个上传，避免并发写库
+}
+
+/* ============================ 主题 / 侧栏 ============================ */
+
+const THEME_MASK_SOLID = 0.72; // 与 style.css 中遮罩渐变的实心比例保持一致
+let themeSwitching = false;
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem(KEYS.theme, theme);
+}
+
+/**
+ * 切换主题：变亮时亮色从按钮处像阳光一样扩散到全屏；变暗时亮色从全屏收回到按钮。
+ * 依赖 View Transitions API；不支持或用户开启「减少动态效果」时直接切换。
+ */
+function toggleTheme() {
+  if (themeSwitching) return;
+  const root = document.documentElement;
+  const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!document.startViewTransition || reduceMotion) {
+    applyTheme(next);
+    return;
+  }
+
+  const rect = els.themeBtn.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  const radius = Math.hypot(Math.max(x, window.innerWidth - x), Math.max(y, window.innerHeight - y));
+  const size = (radius * 2) / THEME_MASK_SOLID; // 保证实心区域能盖住最远的角
+  const toLight = next === 'light';
+  const directionClass = toLight ? 'to-light' : 'to-dark';
+
+  themeSwitching = true;
+  root.classList.add('theme-switching', directionClass);
+  const transition = document.startViewTransition(() => applyTheme(next));
+
+  transition.ready.then(() => {
+    const collapsed = { maskSize: '0px 0px', maskPosition: `${x}px ${y}px` };
+    const expanded = { maskSize: `${size}px ${size}px`, maskPosition: `${x - size / 2}px ${y - size / 2}px` };
+    root.animate(toLight ? [collapsed, expanded] : [expanded, collapsed], {
+      duration: toLight ? 500 : 300,
+      easing: toLight ? 'cubic-bezier(0.25, 0.8, 0.3, 1)' : 'cubic-bezier(0.65, 0, 0.35, 1)',
+      fill: 'forwards',
+      pseudoElement: toLight ? '::view-transition-new(root)' : '::view-transition-old(root)',
+    });
+  }).catch(() => { /* 过渡被跳过时主题已直接生效 */ });
+
+  transition.finished.finally(() => {
+    root.classList.remove('theme-switching', directionClass);
+    themeSwitching = false;
+  });
+}
+
+function closeSidebar() {
+  els.app.classList.remove('sidebar-open');
 }
 
 /* ============================ 事件绑定 ============================ */
 
-els.sendBtn.addEventListener('click', () => {
-  const text = els.input.value.trim();
-  if (!text || streaming) return;
-  els.input.value = '';
+function autoGrow() {
   els.input.style.height = 'auto';
-  sendMessage(text);
+  els.input.style.height = `${Math.min(els.input.scrollHeight, INPUT_MAX_HEIGHT)}px`;
+  els.input.style.overflowY = els.input.scrollHeight > INPUT_MAX_HEIGHT ? 'auto' : 'hidden';
+  updateSendState();
+}
+
+els.sendBtn.addEventListener('click', () => {
+  if (state.streaming) stopStreaming();
+  else submitInput();
 });
 
 els.input.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    els.sendBtn.click();
+    submitInput();
+  }
+});
+els.input.addEventListener('input', autoGrow);
+
+els.newChatBtn.addEventListener('click', startNewChat);
+els.uploadBtn.addEventListener('click', () => els.fileInput.click());
+els.attachBtn.addEventListener('click', () => els.fileInput.click());
+els.exportBtn.addEventListener('click', exportChat);
+els.themeBtn.addEventListener('click', toggleTheme);
+els.sidebarBtn.addEventListener('click', () => els.app.classList.add('sidebar-open'));
+els.scrim.addEventListener('click', closeSidebar);
+els.jumpBtn.addEventListener('click', () => scrollToBottom(true));
+
+els.fileInput.addEventListener('change', (event) => {
+  const files = [...(event.target.files || [])];
+  event.target.value = '';
+  if (files.length) uploadFiles(files);
+});
+
+els.messages.addEventListener('scroll', () => {
+  els.jumpBtn.classList.toggle('show', !nearBottom());
+}, { passive: true });
+
+// 事件委托：代码块复制、空状态推荐问题
+els.messages.addEventListener('click', async (event) => {
+  const copyBtn = event.target.closest('.copy-code');
+  if (copyBtn) {
+    const code = copyBtn.closest('.code-block').querySelector('pre code');
+    await copyText(code.textContent.replace(/\n$/, ''));
+    flashCopied(copyBtn);
+    return;
+  }
+  const suggestion = event.target.closest('.suggestion');
+  if (suggestion && !state.streaming) sendMessage(suggestion.dataset.q);
+});
+
+document.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    startNewChat();
+  } else if (event.key === 'Escape') {
+    if (state.streaming) stopStreaming();
+    closeSidebar();
   }
 });
 
-els.input.addEventListener('input', () => {
-  els.input.style.height = 'auto';
-  els.input.style.height = `${Math.min(els.input.scrollHeight, 160)}px`;
+// 拖拽上传
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+window.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth += 1;
+  els.dropOverlay.classList.add('show');
 });
-
-els.newChatBtn.addEventListener('click', startNewChat);
-
-els.uploadBtn.addEventListener('click', () => els.fileInput.click());
-
-els.fileInput.addEventListener('change', (event) => {
-  const file = event.target.files && event.target.files[0];
-  event.target.value = '';
-  if (file) uploadFile(file);
+window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+window.addEventListener('dragleave', (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) els.dropOverlay.classList.remove('show');
+});
+window.addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  els.dropOverlay.classList.remove('show');
+  const files = [...e.dataTransfer.files];
+  if (files.length) uploadFiles(files);
 });
 
 /* ============================ 初始化 ============================ */
 (async function init() {
-  setStatus('ok', '就绪');
+  renderThreads();
+  renderDocs();
+  refreshStatus();
+  checkHealth();
+  setInterval(() => { if (!state.streaming) checkHealth(); }, HEALTH_INTERVAL);
   await loadHistory();
   els.input.focus();
 })();

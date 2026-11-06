@@ -1,210 +1,113 @@
-# 个人技术知识库聊天助手
+# CCF-A 论文发现助手
 
-把你自己的技术笔记 / 博客 / PDF 放进 `data/` 目录，就可以在网页里和它对话：
-问技术问题会**先检索原文、再基于原文回答并标注来源**；问「你好」这类寒暄则**直接回答、不触发检索**；
-支持多轮追问，找不到答案时会明确说「知识库中未找到相关内容」而不是编造。
+用一句中文描述研究兴趣，从 **CCF-A 类期刊 / 会议**论文库中找出相关论文：按子主题分组、逐篇说明为什么相关，并标注出处。支持按年份、刊物、领域、期刊 / 会议筛选，可在多轮对话中继续缩小范围。
 
-技术栈：FastAPI + LangGraph（StateGraph / MessagesState）+ Chroma + HuggingFace Embeddings + 原生 HTML/CSS/JS。
+当前在线库：**人工智能 · 软件工程 · 数据库/数据挖掘** 三个领域，2023–2025 年，约 **2 万篇**，摘要覆盖 100%。全量库（2020 年至今、93 个 A 类刊物、约 22 万篇）的构建脚本也已提供。
+
+```
+输入：帮我找一些用大语言模型做自动程序修复的论文
+输出：按「免训练提示驱动 / 微调与混合方法」分组的论文清单，
+      每篇带（刊物 年份）与 [Pn] 编号，页面下方对应论文卡片，可核对原文摘要。
+```
 
 ---
 
-## 一、目录结构
+## 一、整体结构
+
+```
+【离线：数据管线 pipeline/】
+  CCF 官网目录 ──► DBLP 全量 XML ──► 筛出 A 类论文 ──► OpenAlex + 官方站点补摘要
+        └──► 数据集 datasets/ccf_a_mini/{年份}/{会议}/papers.jsonl ──► 检索索引 storage/paper_index_mini/
+
+【在线：FastAPI + LangGraph】
+  前端(原生 JS) ──SSE──► /api/chat ──► LangGraph 图（决策 → 工具 → 生成）
+                                        └──► search_papers 工具 ──► BM25 + 向量混合检索（RRF 融合）
+```
+
+技术栈：Python 3.10+ · FastAPI · LangGraph / LangChain · SQLite（FTS5 全文索引 + 会话记忆）· NumPy · Sentence-Transformers · SSE · 原生 HTML/CSS/JS（无框架、无构建）。
+
+## 二、目录
 
 ```text
 tech-chat/
-├── app/
-│   ├── __init__.py
-│   ├── main.py            # FastAPI 入口：挂载静态资源、启动时建库、自动打开浏览器
-│   ├── config.py          # pydantic-settings 集中读取 .env
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── chat.py        # /api/chat（SSE）、/api/upload、/api/history
-│   ├── graph/
-│   │   ├── __init__.py
-│   │   ├── builder.py     # 构建并编译 StateGraph（唯一入口 build_graph()）
-│   │   └── nodes.py       # query_or_respond / generate 节点
-│   ├── rag/
-│   │   ├── __init__.py
-│   │   ├── loader.py      # 按后缀分发加载器（md/txt/pdf/html）
-│   │   ├── splitter.py    # RecursiveCharacterTextSplitter 切分
-│   │   └── store.py       # 向量库单例 + 增量建库
-│   ├── tools.py           # @tool 定义的 retrieve
-│   └── llm.py             # LLM 工厂
-├── frontend/              # index.html / style.css / app.js
-├── data/                  # 你的文档放这里（含示例 sample.md）
-├── chroma_db/             # 向量库持久化目录（首次运行自动生成）
-├── .env.example
-├── requirements.txt
-├── run.py                 # 一行启动
-└── README.md
+├── app/                    # 在线服务
+│   ├── main.py             # FastAPI 入口（挂载前端、启动时打开会话记忆）
+│   ├── config.py           # pydantic-settings 读取 .env
+│   ├── api/chat.py         # /api/chat（SSE）、/api/upload、/api/history
+│   ├── api/papers.py       # /api/papers/search、/api/papers/facets
+│   ├── papers/search.py    # 混合检索：FTS5(BM25) + 向量，RRF 融合，筛选
+│   ├── graph/              # LangGraph：决策节点 / 工具节点 / 生成节点
+│   ├── tools.py            # search_papers（论文库）、retrieve（个人文档）
+│   ├── rag/                # 个人文档入库（加载 / 切分 / 向量库）
+│   └── llm.py              # LLM 工厂
+├── pipeline/               # 离线数据管线（按序号执行）
+│   ├── ccf_venues.py       # ① 抓 CCF 官方目录 → 93 个 A 类刊物
+│   ├── dblp_extract.py     # ② 流式解析 DBLP 全量数据 → 论文清单
+│   ├── openalex_abstracts.py  # ③ 按 DOI 批量补摘要（OpenAlex）
+│   ├── site_abstracts.py   # ③b 官方论文集站点补摘要（NeurIPS/PMLR/CVF/USENIX/Springer…）
+│   ├── build_dataset.py    # ④ 合并 → datasets/ccf_a/{年份}/{会议}/papers.jsonl
+│   ├── build_mini.py       # ④b 按「领域 × 年份」抽取小数据集
+│   └── build_index.py      # ⑤ 建检索索引（SQLite FTS5 + 向量矩阵，增量）
+├── frontend/               # index.html / style.css / app.js
+├── launcher/               # 桌面启动器（C#，双击打开网页；Windows 自带编译器即可构建）
+├── data/                   # 个人文档（可选，用于文档问答）
+└── run.py                  # 一行启动
 ```
 
----
-
-## 二、安装
-
-需要 **Python 3.10+**。
+## 三、快速开始
 
 ```bash
-cd tech-chat
-
-# 建议使用虚拟环境
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS / Linux
-source .venv/bin/activate
-
-pip install -r requirements.txt
+pip install -r requirements.txt      # 或 pip install -r requirements-lock.txt 锁定版本
+cp .env.example .env                 # 填入 LLM 的 base_url / api_key / model
+python run.py                        # 默认 http://127.0.0.1:8000
 ```
 
-> 首次运行会从 HuggingFace 下载 embedding 模型（几十 MB），请保持网络畅通；
-> 也可以把模型提前下载到本地，然后把 `EMBEDDING_MODEL_PATH` 指向本地目录。
+启动前需要论文检索索引。若只克隆本仓库，先跑一次数据管线（见下节），或用 `PAPER_DATASET_DIR` 指向已有数据集再执行 `python -m pipeline.build_index`。
 
----
+## 四、构建数据集与索引
 
-## 三、配置 `.env`
-
-复制模板并填写真实值（**不要把真实 Key 提交到 git**）：
+需要约 2 GB 磁盘、可访问 dblp.org。全流程在 CPU 上约 30 分钟（不含摘要补全的 API 额度等待）。
 
 ```bash
-copy .env.example .env      # Windows
-cp .env.example .env        # macOS / Linux
+python -m pipeline.ccf_venues          # ① 93 个 CCF-A 刊物（结果缓存到 datasets/ccf/raw/）
+# ② 下载 dblp.xml.gz 与 dblp.dtd 放到 datasets/dblp/，然后：
+python -m pipeline.dblp_extract        # ③ 1300 万条记录 → 约 22 万篇 CCF-A 论文（约 3 分钟）
+python -m pipeline.openalex_abstracts  # ④ 按 DOI 补摘要（可断点续跑；免费 key 每日额度足够）
+python -m pipeline.site_abstracts      # ⑤ 官方站点补摘要（无 DOI / OpenAlex 缺失的部分）
+python -m pipeline.build_mini --max 20000   # ⑥ 抽取小数据集（目标领域内摘要覆盖 97%）
+python -m pipeline.build_index         # ⑦ 建索引（增量：只计算新增/变化的论文）
 ```
 
-```dotenv
-# ---------- LLM（OpenAI 兼容接口）----------
-OPENAI_BASE_URL=https://api.openai.com/v1      # 也可换成 DeepSeek / 本地 vLLM / Ollama 的地址
-OPENAI_API_KEY=sk-你的真实key
-LLM_MODEL=gpt-4o-mini
-LLM_TEMPERATURE=0
-LLM_TIMEOUT=60
-LLM_MAX_RETRIES=2
+数据来源与许可：论文元数据来自 [DBLP](https://dblp.org/xml/)（CC0）；摘要来自 [OpenAlex](https://openalex.org)（CC0）与各会议官方论文集页面。**出版社拥有摘要版权**，因此本仓库不附带摘要文本，只提供抓取脚本；如需分发数据集，请只发布元数据（标题、刊物、年份、DOI）。
 
-# ---------- Embedding ----------
-# 支持 HuggingFace 模型名，也支持本地路径（如 D:/models/bge-small-zh-v1.5）
-EMBEDDING_MODEL_PATH=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-EMBEDDING_DEVICE=auto          # auto 会自动判断 cuda 是否可用
-EMBEDDING_NORMALIZE=true
-
-# ---------- 向量库 ----------
-CHROMA_PERSIST_DIR=./chroma_db
-CHROMA_COLLECTION=tech_knowledge
-
-# ---------- RAG ----------
-DATA_DIR=./data
-CHUNK_SIZE=1000
-CHUNK_OVERLAP=200
-RETRIEVAL_K=4
-
-# ---------- 服务 ----------
-HOST=127.0.0.1
-PORT=8000
-OPEN_BROWSER=true              # 启动后自动打开浏览器
-```
-
-| 变量 | 说明 |
-| --- | --- |
-| `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `LLM_MODEL` | 任意 OpenAI 兼容服务的地址、密钥、模型名 |
-| `EMBEDDING_MODEL_PATH` | HuggingFace 模型名或本地模型目录；中文资料推荐 `BAAI/bge-small-zh-v1.5` |
-| `EMBEDDING_DEVICE` | `auto` / `cpu` / `cuda` |
-| `RETRIEVAL_K` | 每次检索返回的片段数量 |
-| `OPEN_BROWSER` | 是否在启动后自动打开 `http://HOST:PORT` |
-
----
-
-## 四、启动
-
-```bash
-python run.py
-```
-
-等价于 `uvicorn app.main:app --host 127.0.0.1 --port 8000`。
-启动过程会：
-
-1. 编译 LangGraph 状态图（`query_or_respond → tools → generate`）；
-2. 扫描 `data/` 目录，把新增 / 变更的文件切分并写入 `./chroma_db`（未变化的文件自动跳过）；
-3. 延迟约 1.5 秒后用 `webbrowser.open("http://127.0.0.1:8000")` 自动打开浏览器。
-
-浏览器没有自动弹出时，手动访问 <http://127.0.0.1:8000> 即可。
-
----
-
-## 五、使用说明
-
-1. **问技术问题**：例如「什么是任务分解？」——机器人会先检索，再基于原文回答，答案下方展示
-   `文件名 + chunk 起始位置` 的引用来源。
-2. **寒暄**：例如「你好」——不会触发检索，直接回答。
-3. **多轮追问**：例如接着问「能举个例子吗？」——同一 `thread_id` 下会带上历史上下文。
-4. **知识库没有的内容**：会明确回答「知识库中未找到相关内容」，不会编造。
-5. **新对话**：点击右上角「新对话」，会清空历史并重新生成 `thread_id`。
-6. **上传文档**：点击「上传文档」选择 `.md / .txt / .pdf / .html` 文件，入库后即可立即提问
-   （也可以在服务运行时直接把文件丢进 `data/` 目录，然后调用 `POST /api/upload` 或重启服务）。
-
-### 接口一览
+## 五、接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/chat` | 请求体 `{"thread_id": "...", "message": "..."}`，返回 SSE 流 |
-| `POST` | `/api/upload` | `multipart/form-data`，字段名 `file`，立即入库 |
-| `GET` | `/api/history?thread_id=xxx` | 拉取该会话历史消息 |
+| `POST` | `/api/chat` | `{"thread_id","message"}` → SSE 流 |
+| `GET` | `/api/papers/search?q=&k=&year_from=&venue=&category=&type=` | 论文混合检索（`venue` / `category` / `type` 可重复） |
+| `GET` | `/api/papers/facets` | 筛选面板元数据（总数、年份范围、领域与刊物） |
+| `POST` | `/api/upload` | 上传个人文档（`multipart/form-data`，字段 `file`） |
+| `GET` | `/api/history?thread_id=` | 会话历史 |
 | `GET` | `/health` | 健康检查 |
 
-SSE 事件类型：
+SSE 事件：`status`（阶段提示）、`sources`（论文或文档片段，论文项带 `kind: "paper"`）、`token`（逐字文本）、`done`、`error`。
 
-```text
-{"type":"status","stage":"thinking","message":"正在思考…"}
-{"type":"status","stage":"retrieving","message":"正在检索知识库…"}
-{"type":"sources","sources":[{"file_name":"sample.md","start_index":0,"preview":"..."}]}
-{"type":"token","content":"任务"}
-{"type":"done"}
-{"type":"error","message":"服务异常：..."}
-```
+## 六、实现要点
 
----
+- **数据**：DBLP 全量 XML 用 `gzip` 流式解压 + `lxml.iterparse` 逐条处理，内存恒定；处理了会议改为期刊发表（PACMPL/PACMHCI/PVLDB）、Workshop 混入主会、非论文条目等数据问题。
+- **检索**：SQLite FTS5 做 BM25 关键词检索（标题权重 ×5），Sentence-Transformers 向量做语义检索，两路各取 200 候选，用 RRF（k=60）融合；筛选条件写进 SQL 与布尔掩码，两路同时生效。不引入向量数据库——2 万篇 × 384 维常驻内存，带筛选查询中位延迟约 61 ms。
+- **Agent**：LangGraph 三节点（决策 / 工具 / 生成）。`search_papers` 的参数 schema 要求英文检索短语与结构化筛选条件，模型在工具调用中完成中→英改写与条件抽取；多轮追问沿用上一轮主题。
+- **可追溯**：回答只能引用检索结果，论文带 `[Pn]` 编号，前端渲染为可核对的论文卡片。
+- **记忆**：LangGraph `AsyncSqliteSaver` 持久化会话，重启不丢。
 
-## 六、常见问题（FAQ）
+## 七、已知限制
 
-**1. 启动报 `未配置 OPENAI_API_KEY`**
-没有创建 `.env` 或没有填写 `OPENAI_API_KEY`。复制 `.env.example` 为 `.env` 并填写即可。
+- 在线库覆盖 3 个领域 × 2023–2025；库外领域/年份会如实说明而不是强行回答。
+- 尚无正式检索评测集与重排序（当前效果只有人工抽查）。
+- 嵌入模型以英文为主，中文查询依赖 LLM 改写。
+- 依赖第三方 LLM 接口的稳定性。
 
-**2. 页面能打开，但提问一直转圈 / 报错**
-多为 `OPENAI_BASE_URL` 或 `OPENAI_API_KEY` 不正确，或网络无法访问该服务。
-后端控制台会打印具体异常；可在 `.env` 中调大 `LLM_TIMEOUT`。
+## 八、配置项
 
-**3. 首次启动很慢**
-首次运行需要下载 embedding 模型并做向量化。下载完成后会缓存在本地（HuggingFace cache），
-之后再启动会快很多；已经入库的文件（指纹未变化）会被自动跳过。
-
-**4. 明明有文档却回答「知识库中未找到相关内容」**
-- 确认文件后缀受支持（`.md / .txt / .pdf / .html` 等）；
-- 确认文件放进了 `DATA_DIR` 指定的目录，然后重启服务或通过页面上传；
-- 中文资料建议换成中文 embedding 模型（如 `BAAI/bge-small-zh-v1.5`），并适当调大 `CHUNK_SIZE`；
-- 调大 `RETRIEVAL_K` 让召回片段更多。
-
-**5. 想让文件重新入库**
-删掉对应的 `chroma_db/` 目录后重启，或在 Python 中调用
-`from app.rag.store import build_index; build_index(force=True)`。
-
-**6. 换了一个 embedding 模型后检索结果很怪 / 报维度错误**
-Chroma 里存的向量与当前 embedding 模型维度不一致。删除 `chroma_db/` 目录后重启重建即可。
-
-**7. 端口被占用**
-修改 `.env` 里的 `PORT`（并同步修改 `HOST` 如需对外暴露）。
-
-**8. 「新对话」之后历史还在**
-历史保存在内存（`MemorySaver`）中并按 `thread_id` 隔离，「新对话」会生成新的 `thread_id`，
-因此不会看到旧内容；服务重启后历史会全部清空（内存存储，不落盘）。
-
----
-
-## 七、实现要点（开发参考）
-
-- **图只构建一次**：`app/graph/builder.py` 中模块级创建 `StateGraph(MessagesState)` 并注册节点，
-  `build_graph()` 内用 `graph_builder.compile(checkpointer=memory)` 编译并缓存，避免重复 `add_node`。
-- **记忆**：`MemorySaver` 在编译时传入，每个请求都要带 `config={"configurable": {"thread_id": ...}}`。
-- **提示词**：直接使用 `SystemMessage` 拼接，不依赖 `hub.pull`，避免联网与版本漂移。
-- **工具**：`retrieve` 用 `@tool(response_format="content_and_artifact")`，返回
-  `(给模型阅读的文本, 结构化片段列表)`，配合 `ToolNode(..., response_format="content_and_artifact")`
-  把引用来源透传到前端。
-- **单例**：向量库、Embedding、LLM、状态图都用模块级单例 + 工厂函数，避免重复初始化。
+`config.py` / `.env` 中的关键项：`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`LLM_MODEL`、`EMBEDDING_MODEL_PATH`（或 `EMBEDDING_USE_LOCAL` + `EMBEDDING_LOCAL_PATH`）、`PAPER_DATASET_DIR`、`PAPER_INDEX_DIR`、`CHECKPOINT_DB`、`OPENALEX_API_KEY`（可选，提升补摘要速度）。完整列表见 `.env.example`。

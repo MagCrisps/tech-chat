@@ -61,14 +61,26 @@ def _preview(text: str, limit: int = 300) -> str:
 
 
 def _collect_sources(update: dict[str, Any]) -> list[dict[str, Any]]:
-    """从 tools 节点的更新里提取检索到的文档片段。"""
+    """从 tools 节点的更新里提取检索结果：论文（kind=paper）或文档片段。"""
     sources: list[dict[str, Any]] = []
     for message in (update or {}).get("messages") or []:
         artifact = getattr(message, "artifact", None)
         if not artifact:
             continue
         for doc in artifact:
-            if isinstance(doc, dict):
+            if isinstance(doc, dict) and doc.get("kind") == "paper":
+                sources.append(
+                    {
+                        "kind": "paper",
+                        "title": doc.get("title"),
+                        "venue": doc.get("venue"),
+                        "year": doc.get("year"),
+                        "category": doc.get("category"),
+                        "type": doc.get("type"),
+                        "preview": _preview(str(doc.get("abstract", ""))),
+                    }
+                )
+            elif isinstance(doc, dict):
                 sources.append(
                     {
                         "file_name": doc.get("file_name"),
@@ -97,7 +109,7 @@ async def chat(request: ChatRequest) -> StreamingResponse:
 
     事件类型：
       - `{"type": "status", "stage": "thinking|retrieving", ...}` 阶段提示
-      - `{"type": "sources", "sources": [...]}` 本次回答引用的文档来源
+      - `{"type": "sources", "sources": [...]}` 本次回答引用的来源（论文项带 kind="paper"）
       - `{"type": "token", "content": "..."}` 逐 token 文本
       - `{"type": "done"}` 结束
       - `{"type": "error", "message": "..."}` 异常
@@ -114,10 +126,14 @@ async def chat(request: ChatRequest) -> StreamingResponse:
                     for node, update in (chunk or {}).items():
                         if node == "query_or_respond":
                             produced = (update or {}).get("messages") or []
-                            if any(getattr(m, "tool_calls", None) for m in produced):
-                                yield _sse(
-                                    {"type": "status", "stage": "retrieving", "message": "正在检索知识库…"}
-                                )
+                            calls = [c for m in produced for c in (getattr(m, "tool_calls", None) or [])]
+                            if calls:
+                                searching_papers = any(c.get("name") == "search_papers" for c in calls)
+                                yield _sse({
+                                    "type": "status",
+                                    "stage": "retrieving",
+                                    "message": "正在检索论文库…" if searching_papers else "正在检索知识库…",
+                                })
                         elif node == "tools":
                             sources = _collect_sources(update or {})
                             if sources:
@@ -193,7 +209,7 @@ async def history(thread_id: str = Query(..., min_length=1)) -> dict[str, Any]:
     """按 `thread_id` 返回该会话的历史消息（只保留 user / assistant）。"""
     try:
         graph = build_graph()
-        state = await run_in_threadpool(graph.get_state, get_thread_config(thread_id))
+        state = await graph.aget_state(get_thread_config(thread_id))
         messages: list[BaseMessage] = list((state.values or {}).get("messages", [])) if state else []
 
         result: list[dict[str, str]] = []

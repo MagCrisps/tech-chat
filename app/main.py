@@ -1,4 +1,4 @@
-"""FastAPI 入口：注册路由、启动时建库、启动后自动打开浏览器。"""
+"""FastAPI 入口：注册路由、打开会话记忆、启动时建库、启动后自动打开浏览器。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ from fastapi.staticfiles import StaticFiles
 # huggingface_hub / sentence-transformers 的模块，否则镜像设置不会生效。
 from app.config import settings
 from app.api.chat import router as chat_router
-from app.graph import build_graph
+from app.api.papers import router as papers_router
+from app.graph import build_graph, open_checkpointer
 from app.rag.store import build_index
 
 logging.basicConfig(
@@ -60,14 +61,15 @@ def _prepare() -> None:
 
 
 async def lifespan(_: FastAPI):
-    """应用生命周期：启动时建库 + 自动打开浏览器。"""
+    """应用生命周期：打开会话记忆 + 建库 + 自动打开浏览器；退出时关闭记忆库连接。"""
     logger.info("正在初始化…（数据目录：%s）", settings.data_dir_path)
-    await run_in_threadpool(_prepare)
+    async with open_checkpointer():
+        await run_in_threadpool(_prepare)
 
-    if settings.open_browser:
-        threading.Timer(1.5, _open_browser).start()
+        if settings.open_browser:
+            threading.Timer(1.5, _open_browser).start()
 
-    yield
+        yield
     logger.info("服务已停止。")
 
 
@@ -80,6 +82,7 @@ app = FastAPI(
 
 # 业务接口（必须在静态资源挂载之前注册）
 app.include_router(chat_router)
+app.include_router(papers_router)
 
 
 @app.get("/health")

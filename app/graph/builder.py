@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Optional
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from app.config import settings
 from app.graph.nodes import generate, query_or_respond
 from app.tools import TOOLS
 
@@ -37,21 +41,41 @@ graph_builder.add_conditional_edges(
 graph_builder.add_edge("tools", "generate")
 graph_builder.add_edge("generate", END)
 
-# 多轮记忆：进程内 MemorySaver，按 thread_id 隔离会话
-memory: MemorySaver = MemorySaver()
-
+# 多轮记忆：服务运行时由 `open_checkpointer()` 注入 SQLite checkpointer，按 thread_id 隔离会话，
+# 重启后历史仍在；未注入时（如单独脚本调用）退回进程内 MemorySaver。
+_checkpointer: Optional[BaseCheckpointSaver] = None
 _compiled_graph: Optional[Any] = None
+
+
+@asynccontextmanager
+async def open_checkpointer() -> AsyncIterator[BaseCheckpointSaver]:
+    """打开 SQLite 会话记忆，并在退出时关闭连接（在 FastAPI lifespan 中使用）。"""
+    global _checkpointer, _compiled_graph
+    db_path = settings.checkpoint_db_path
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
+        await saver.setup()
+        _checkpointer, _compiled_graph = saver, None
+        logger.info("会话记忆已就绪（SQLite）：%s", db_path)
+        try:
+            yield saver
+        finally:
+            _checkpointer, _compiled_graph = None, None
 
 
 def build_graph() -> Any:
     """编译并返回全局唯一的状态图实例（首次调用时编译，之后复用）。
 
     Returns:
-        已挂载 `MemorySaver` checkpointer 的可运行图。
+        已挂载 checkpointer（SQLite，或兜底的 MemorySaver）的可运行图。
     """
     global _compiled_graph
     if _compiled_graph is None:
-        _compiled_graph = graph_builder.compile(checkpointer=memory)
+        checkpointer = _checkpointer
+        if checkpointer is None:
+            logger.warning("未初始化 SQLite 会话记忆，改用进程内 MemorySaver（重启后历史会丢失）")
+            checkpointer = MemorySaver()
+        _compiled_graph = graph_builder.compile(checkpointer=checkpointer)
         logger.info("LangGraph 状态图已编译完成，节点：query_or_respond / tools / generate")
     return _compiled_graph
 
