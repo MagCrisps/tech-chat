@@ -120,6 +120,9 @@ async def chat(request: ChatRequest) -> StreamingResponse:
 
     async def event_stream() -> AsyncGenerator[str, None]:
         yield _sse({"type": "status", "stage": "thinking", "message": "正在思考…"})
+        # 决策节点的文本先缓冲、不直接下发：模型偶尔把工具调用当文本吐出（DSML 标记），
+        # 节点结束后若确认是直接回答，再把缓冲的文本一次性发出；若是工具调用，则丢弃缓冲。
+        router_buffer: list[str] = []
         try:
             async for mode, chunk in graph.astream(inputs, config=config, stream_mode=["messages", "updates"]):
                 if mode == "updates":
@@ -128,12 +131,19 @@ async def chat(request: ChatRequest) -> StreamingResponse:
                             produced = (update or {}).get("messages") or []
                             calls = [c for m in produced for c in (getattr(m, "tool_calls", None) or [])]
                             if calls:
+                                router_buffer.clear()
                                 searching_papers = any(c.get("name") == "search_papers" for c in calls)
                                 yield _sse({
                                     "type": "status",
                                     "stage": "retrieving",
                                     "message": "正在检索论文库…" if searching_papers else "正在检索知识库…",
                                 })
+                            else:
+                                # 直接回答：以节点最终产出的文本为准（可能已被清理过），而不是原始分片
+                                final_text = "".join(_chunk_text(m) for m in produced) or "".join(router_buffer)
+                                router_buffer.clear()
+                                if final_text:
+                                    yield _sse({"type": "token", "content": final_text})
                         elif node == "tools":
                             sources = _collect_sources(update or {})
                             if sources:
@@ -147,7 +157,11 @@ async def chat(request: ChatRequest) -> StreamingResponse:
                     ):
                         continue
                     text = _chunk_text(message_chunk)
-                    if text:
+                    if not text:
+                        continue
+                    if metadata.get("langgraph_node") == "query_or_respond":
+                        router_buffer.append(text)
+                    else:
                         yield _sse({"type": "token", "content": text})
             yield _sse({"type": "done"})
         except Exception as exc:  # noqa: BLE001 - 统一降级为前端可展示的错误

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import uuid
 from functools import lru_cache
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.graph import MessagesState
 
 from app.llm import get_llm, get_llm_with_tools
@@ -68,7 +71,56 @@ def query_or_respond(state: MessagesState) -> dict:
     """
     messages = [SystemMessage(content=ROUTER_PROMPT), *state["messages"]]
     response = _llm_with_tools().invoke(messages)
-    return {"messages": [response]}
+    return {"messages": [_recover_leaked_tool_calls(response)]}
+
+
+# DeepSeek 系模型偶尔会把工具调用以内部标记（<｜DSML｜>…）当作普通文本输出，而不是走
+# 结构化 tool_calls 通道。这里把这种「泄露」的文本解析回真正的工具调用，让图照常路由到 tools 节点。
+_DSML_INVOKE = re.compile(
+    r"<[｜|]*DSML[｜|]*\s*invoke\s+name=\"(?P<name>[\w-]+)\">(?P<body>.*?)</[｜|]*DSML[｜|]*\s*invoke>",
+    re.DOTALL,
+)
+_DSML_PARAM = re.compile(
+    r"<[｜|]*DSML[｜|]*\s*parameter\s+name=\"(?P<name>[\w-]+)\"[^>]*>(?P<value>.*?)</[｜|]*DSML[｜|]*\s*parameter>",
+    re.DOTALL,
+)
+_KNOWN_TOOLS = {t.name for t in TOOLS}
+
+
+def _parse_param(raw: str) -> object:
+    """参数值优先按 JSON 解析（数组 / 数字 / 布尔），失败则当作字符串。"""
+    text = raw.strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return text
+
+
+def _recover_leaked_tool_calls(message: AIMessage) -> AIMessage:
+    """若模型回复里没有结构化 tool_calls、却含有 DSML 文本形式的调用，则解析并补上。"""
+    if getattr(message, "tool_calls", None):
+        return message
+    content = message.content if isinstance(message.content, str) else str(message.content)
+    if "DSML" not in content:
+        return message
+
+    calls = []
+    for m in _DSML_INVOKE.finditer(content):
+        name = m.group("name")
+        if name not in _KNOWN_TOOLS:
+            logger.warning("忽略未知工具的泄露调用：%s", name)
+            continue
+        args = {p.group("name"): _parse_param(p.group("value")) for p in _DSML_PARAM.finditer(m.group("body"))}
+        calls.append({"name": name, "args": args, "id": f"call_{uuid.uuid4().hex[:24]}", "type": "tool_call"})
+
+    if not calls:
+        # 解析不出有效调用：至少别把内部标记原样展示给用户
+        logger.warning("模型输出含 DSML 标记但无法解析为工具调用，已清理文本")
+        cleaned = re.sub(r"<[｜|]*DSML[｜|]*.*?>", "", content, flags=re.DOTALL).strip()
+        return AIMessage(content=cleaned or "抱歉，这次没有生成有效回答，请再试一次。", id=message.id)
+
+    logger.warning("从文本中恢复了 %d 个泄露的工具调用：%s", len(calls), [c["name"] for c in calls])
+    return AIMessage(content="", tool_calls=calls, id=message.id)
 
 
 def generate(state: MessagesState) -> dict:
