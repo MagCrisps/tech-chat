@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     open_browser: bool = True
+    allow_upload: bool = True   # 公网部署时设为 false：关闭文档上传入口
 
     # ---------- 派生路径（只读属性）----------
     @property

@@ -68,6 +68,7 @@ const state = {
   healthy: null, // null = 未知
   transcript: [], // 当前会话消息 [{ role, content, sources? }]，用于导出
   loadSeq: 0, // 防止切换会话时历史请求乱序
+  uploadEnabled: true, // 由 /health 的 features.upload 决定；公网部署会关闭
 };
 localStorage.setItem(KEYS.thread, state.threadId);
 
@@ -163,11 +164,20 @@ function refreshStatus() {
   return state.healthy ? setStatus('ok', '服务就绪') : setStatus('error', '无法连接服务');
 }
 
+/** 按服务端开放的功能显示或隐藏入口（目前只有文档上传）。 */
+function applyFeatures(features) {
+  state.uploadEnabled = features.upload !== false;
+  for (const node of [els.uploadBtn, els.attachBtn, $('upload-hint')]) {
+    if (node) node.hidden = !state.uploadEnabled;
+  }
+}
+
 async function checkHealth() {
   try {
     const res = await fetch(API.health, { cache: 'no-store' });
     const data = await res.json();
     state.healthy = res.ok && data.status === 'ok';
+    applyFeatures(data.features || {});
   } catch (_) {
     state.healthy = false;
   }
@@ -1030,7 +1040,7 @@ document.addEventListener('keydown', (event) => {
 let dragDepth = 0;
 const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
 window.addEventListener('dragenter', (e) => {
-  if (!hasFiles(e)) return;
+  if (!hasFiles(e) || !state.uploadEnabled) return;
   e.preventDefault();
   dragDepth += 1;
   els.dropOverlay.classList.add('show');
@@ -1043,6 +1053,7 @@ window.addEventListener('dragleave', (e) => {
 });
 window.addEventListener('drop', (e) => {
   if (!hasFiles(e)) return;
+  if (!state.uploadEnabled) { e.preventDefault(); return; }
   e.preventDefault();
   dragDepth = 0;
   els.dropOverlay.classList.remove('show');

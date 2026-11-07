@@ -86,9 +86,9 @@ app.include_router(papers_router)
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    """健康检查。"""
-    return {"status": "ok"}
+async def health() -> dict[str, object]:
+    """健康检查；同时告诉前端此部署开放了哪些功能。"""
+    return {"status": "ok", "features": {"upload": settings.allow_upload}}
 
 
 # 前端静态资源：html=True 时访问 "/" 会自动返回 index.html

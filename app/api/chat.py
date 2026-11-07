@@ -185,6 +185,8 @@ async def chat(request: ChatRequest) -> StreamingResponse:
 @router.post("/upload")
 async def upload(file: UploadFile = File(...)) -> JSONResponse:
     """接收上传文件，保存到 `data/` 后立即向量化入库。"""
+    if not settings.allow_upload:
+        return JSONResponse(status_code=403, content={"error": "此部署已关闭文档上传"})
     try:
         raw_name = Path(file.filename or "").name
         if not raw_name:
