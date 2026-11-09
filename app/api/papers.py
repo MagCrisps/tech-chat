@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from app.api.auth import require_user
 
 from app.papers.search import as_filters, get_paper_index
 
@@ -23,6 +25,7 @@ def search_papers(
     venue: Optional[list[str]] = Query(None, description="刊物简称，可重复，如 venue=CVPR&venue=ICCV"),
     category: Optional[list[str]] = Query(None, description="CCF 领域名，可重复"),
     type: Optional[list[str]] = Query(None, description="journal / conference"),
+    user: str = Depends(require_user),
 ) -> dict[str, Any]:
     """混合检索 CCF-A 论文（同步函数，FastAPI 会放到线程池执行，不阻塞事件循环）。"""
     try:
@@ -34,7 +37,7 @@ def search_papers(
 
 
 @router.get("/facets")
-def facets() -> dict[str, Any]:
+def facets(user: str = Depends(require_user)) -> dict[str, Any]:
     """筛选面板元数据：总数、年份范围、领域与刊物。"""
     try:
         return get_paper_index().facets()

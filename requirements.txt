@@ -2,6 +2,7 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
+bcrypt>=4.1.0          # 用户密码哈希（app/users.py）
 pydantic>=2.7.0
 pydantic-settings>=2.3.0
 

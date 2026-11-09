@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     paper_index_dir: str = "./storage/paper_index_mini"  # 检索索引（由 pipeline.build_index 生成）
     paper_search_k: int = 8                           # 每次检索返回给模型的论文数
 
+    # ---------- 用户与登录 ----------
+    users_db: str = "./storage/users.sqlite"  # 用户与会话（bcrypt 哈希 + 会话 token 哈希）
+    session_ttl_days: int = 7                 # 登录有效期（天）
+    cookie_secure: bool = False               # 走 HTTPS 时应设为 true
+
     # ---------- 服务 ----------
     host: str = "127.0.0.1"
     port: int = 8000
@@ -103,6 +108,11 @@ class Settings(BaseSettings):
     def paper_index_path(self) -> Path:
         """论文检索索引目录的绝对路径。"""
         return self._resolve(self.paper_index_dir)
+
+    @property
+    def users_db_path(self) -> Path:
+        """用户与会话数据库的绝对路径。"""
+        return self._resolve(self.users_db)
 
     @property
     def static_dir(self) -> Path:

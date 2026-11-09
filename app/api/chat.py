@@ -7,12 +7,13 @@ import logging
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
+from app.api.auth import require_user
 from app.config import settings
 from app.graph import build_graph, get_thread_config
 from app.rag.loader import is_supported
@@ -104,7 +105,7 @@ def _collect_sources(update: dict[str, Any]) -> list[dict[str, Any]]:
 # 1) 流式对话
 # --------------------------------------------------------------------------- #
 @router.post("/chat")
-async def chat(request: ChatRequest) -> StreamingResponse:
+async def chat(request: ChatRequest, user: str = Depends(require_user)) -> StreamingResponse:
     """以 SSE 流式返回回答。
 
     事件类型：
@@ -221,7 +222,7 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
 # 3) 拉取历史消息
 # --------------------------------------------------------------------------- #
 @router.get("/history")
-async def history(thread_id: str = Query(..., min_length=1)) -> dict[str, Any]:
+async def history(thread_id: str = Query(..., min_length=1), user: str = Depends(require_user)) -> dict[str, Any]:
     """按 `thread_id` 返回该会话的历史消息（只保留 user / assistant）。"""
     try:
         graph = build_graph()

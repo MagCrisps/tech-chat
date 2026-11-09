@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 # 注意：必须先导入 config（它会设置 HF_ENDPOINT 镜像地址），再导入会触发
 # huggingface_hub / sentence-transformers 的模块，否则镜像设置不会生效。
 from app.config import settings
+from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.papers import router as papers_router
 from app.graph import build_graph, open_checkpointer
@@ -81,6 +82,7 @@ app = FastAPI(
 )
 
 # 业务接口（必须在静态资源挂载之前注册）
+app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(papers_router)
 

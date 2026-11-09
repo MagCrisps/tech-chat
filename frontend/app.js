@@ -16,6 +16,9 @@
 
 const API = {
   chat: '/api/chat',
+  login: '/api/auth/login',
+  logout: '/api/auth/logout',
+  me: '/api/auth/me',
   upload: '/api/upload',
   health: '/health',
   history: (id) => `/api/history?thread_id=${encodeURIComponent(id)}`,
@@ -57,6 +60,16 @@ const els = {
   scrim: $('scrim'),
   jumpBtn: $('jump-btn'),
   dropOverlay: $('drop-overlay'),
+  loginModal: $('login-modal'),
+  loginForm: $('login-form'),
+  loginUser: $('login-user'),
+  loginPass: $('login-pass'),
+  loginError: $('login-error'),
+  loginSubmit: $('login-submit'),
+  loginCancel: $('login-cancel'),
+  userBadge: $('user-badge'),
+  userName: $('user-name'),
+  logoutBtn: $('logout-btn'),
   emptyTpl: $('empty-tpl'),
   toasts: $('toasts'),
 };
@@ -69,6 +82,8 @@ const state = {
   transcript: [], // 当前会话消息 [{ role, content, sources? }]，用于导出
   loadSeq: 0, // 防止切换会话时历史请求乱序
   uploadEnabled: true, // 由 /health 的 features.upload 决定；公网部署会关闭
+  user: null, // 当前登录用户名；null 表示未登录
+  pendingText: null, // 因未登录被拦下的那条消息，登录后自动发送
 };
 localStorage.setItem(KEYS.thread, state.threadId);
 
@@ -615,6 +630,81 @@ function stopStreaming() {
   if (state.controller) state.controller.abort();
 }
 
+/* ============================ 登录 ============================ */
+
+/** 同步服务端登录状态，并更新侧栏用户显示。 */
+async function refreshUser() {
+  try {
+    const res = await fetch(API.me, { cache: 'no-store' });
+    const data = await res.json();
+    state.user = data.logged_in ? data.username : null;
+  } catch (_) {
+    state.user = null;
+  }
+  renderUser();
+  return state.user;
+}
+
+function renderUser() {
+  const logged = Boolean(state.user);
+  if (els.userBadge) els.userBadge.hidden = !logged;
+  if (els.userName) els.userName.textContent = state.user || '';
+}
+
+function openLogin(prefillUser) {
+  if (!els.loginModal) return;
+  els.loginError.hidden = true;
+  els.loginForm.reset();
+  if (prefillUser) els.loginUser.value = prefillUser;
+  els.loginModal.hidden = false;
+  setTimeout(() => (els.loginUser.value ? els.loginPass : els.loginUser).focus(), 30);
+}
+
+function closeLogin() {
+  if (els.loginModal) els.loginModal.hidden = true;
+  state.pendingText = null;
+}
+
+async function doLogin(username, password) {
+  els.loginSubmit.disabled = true;
+  els.loginError.hidden = true;
+  try {
+    const res = await fetch(API.login, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = typeof data.detail === 'string' ? data.detail : '登录失败，请重试';
+      throw new Error(detail);
+    }
+    state.user = data.username;
+    renderUser();
+    els.loginModal.hidden = true;
+    const pending = state.pendingText;
+    state.pendingText = null;
+    toast(`已登录：${state.user}`);
+    if (pending) sendMessage(pending);   // 把刚才被拦下的问题接着发出去
+    return true;
+  } catch (error) {
+    els.loginError.textContent = error.message;
+    els.loginError.hidden = false;
+    els.loginPass.select();
+    return false;
+  } finally {
+    els.loginSubmit.disabled = false;
+  }
+}
+
+/** 需要登录才能继续的操作：未登录则记下待发送内容并弹框。 */
+function ensureLogin(text) {
+  if (state.user) return true;
+  state.pendingText = text || null;
+  openLogin();
+  return false;
+}
+
 async function sendMessage(text) {
   if (state.streaming) return;
   const threadAtStart = state.threadId;
@@ -647,6 +737,13 @@ async function sendMessage(text) {
         detail = data.error || data.detail || detail;
         if (typeof detail !== 'string') detail = JSON.stringify(detail);
       } catch (_) { /* 非 JSON 响应 */ }
+      if (res.status === 401) {
+        // 会话过期或被踢下线：提示重新登录，并把这条问题留到登录后重发
+        state.user = null;
+        renderUser();
+        state.pendingText = text;
+        openLogin();
+      }
       throw new Error(detail);
     }
 
@@ -711,6 +808,7 @@ async function sendMessage(text) {
 function submitInput() {
   const text = els.input.value.trim();
   if (!text || state.streaming) return;
+  if (!ensureLogin(text)) return;   // 未登录：弹登录框，登录后自动发送这条
   els.input.value = '';
   autoGrow();
   sendMessage(text);
@@ -1003,6 +1101,25 @@ els.sidebarBtn.addEventListener('click', () => els.app.classList.add('sidebar-op
 els.scrim.addEventListener('click', closeSidebar);
 els.jumpBtn.addEventListener('click', () => scrollToBottom(true));
 
+// 登录弹窗
+els.loginForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const username = els.loginUser.value.trim();
+  const password = els.loginPass.value;
+  if (!username || !password) return;
+  doLogin(username, password);
+});
+els.loginCancel.addEventListener('click', closeLogin);
+els.loginModal.addEventListener('click', (event) => {
+  if (event.target === els.loginModal) closeLogin();   // 点遮罩关闭
+});
+els.logoutBtn.addEventListener('click', async () => {
+  await fetch(API.logout, { method: 'POST' }).catch(() => {});
+  state.user = null;
+  renderUser();
+  toast('已退出登录');
+});
+
 els.fileInput.addEventListener('change', (event) => {
   const files = [...(event.target.files || [])];
   event.target.value = '';
@@ -1031,7 +1148,8 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault();
     startNewChat();
   } else if (event.key === 'Escape') {
-    if (state.streaming) stopStreaming();
+    if (els.loginModal && !els.loginModal.hidden) closeLogin();
+    else if (state.streaming) stopStreaming();
     closeSidebar();
   }
 });
@@ -1066,6 +1184,7 @@ window.addEventListener('drop', (e) => {
   renderThreads();
   renderDocs();
   refreshStatus();
+  await refreshUser();   // 先确定登录状态，决定侧栏是否显示用户名
   checkHealth();
   setInterval(() => { if (!state.streaming) checkHealth(); }, HEALTH_INTERVAL);
   await loadHistory();
