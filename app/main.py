@@ -93,9 +93,23 @@ async def health() -> dict[str, object]:
     return {"status": "ok", "features": {"upload": settings.allow_upload}}
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """静态资源禁用启发式缓存。
+
+    不设 Cache-Control 时，浏览器（尤其 Chrome）会自行决定缓存时长，可能好几天，
+    导致更新后用户仍在跑旧版 JS。这里要求每次都向服务器校验（no-cache 仍允许 304），
+    代价只是多一次条件请求。
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
 # 前端静态资源：html=True 时访问 "/" 会自动返回 index.html
 if settings.static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(settings.static_dir), html=True), name="frontend")
+    app.mount("/", NoCacheStaticFiles(directory=str(settings.static_dir), html=True), name="frontend")
 else:  # pragma: no cover - 正常仓库里 frontend/ 一定存在
     logger.warning("未找到前端目录：%s", settings.static_dir)
 
