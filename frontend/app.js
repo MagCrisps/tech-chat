@@ -873,6 +873,13 @@ async function loadHistory() {
   const id = state.threadId;
   try {
     const res = await fetch(API.history(id));
+    if (res.status === 401) {
+      // 未登录时历史接口必然 401，这不是错误：显示空状态即可
+      state.user = null;
+      renderUser();
+      if (seq === state.loadSeq) showEmptyState();
+      return;
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (seq !== state.loadSeq) return; // 已切换到别的会话
@@ -1187,6 +1194,7 @@ window.addEventListener('drop', (e) => {
   await refreshUser();   // 先确定登录状态，决定侧栏是否显示用户名
   checkHealth();
   setInterval(() => { if (!state.streaming) checkHealth(); }, HEALTH_INTERVAL);
-  await loadHistory();
+  if (state.user) await loadHistory();   // 未登录不请求历史，直接显示空状态
+  else showEmptyState();
   els.input.focus();
 })();
