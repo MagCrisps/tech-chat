@@ -285,9 +285,8 @@ magcrisp.duckdns.org {
 	}
 
 	handle {
-		basic_auth {
-			demo $2a$14$...
-		}
+		# 鉴权由应用自身的登录功能负责（见「附录 A：用户与登录」），
+		# Basic Auth 已关闭 —— 两套同时开会弹两次密码框。
 		# 上传入口双层关闭（第一道）
 		@upload path /api/upload
 		respond @upload 403
@@ -311,7 +310,7 @@ magcrisp.duckdns.org {
 要点：
 - 写域名 → Caddy 自动申请 Let's Encrypt 证书并把 http 跳转到 https；**没有域名时写 `:80`**。
 - `flush_interval -1` **必须写**：不写会把响应攒起来，流式回答变成「等几十秒后一次性出现」。
-- 密码用 `caddy hash-password` 生成哈希，**不要写明文**（明文会留在命令历史里）。
+- 若暂时不想做登录功能，也可以用 Caddy 的 `basic_auth` 顶替（`caddy hash-password` 生成哈希，不要写明文）。但应用已有登录功能时**不要同时启用**，否则会弹两次密码框。
 - `@upload → 403` 与程序里的 `ALLOW_UPLOAD=false` 形成两层（第二道在后端）。
 
 应用：
@@ -342,13 +341,16 @@ sudo ufw enable
 从**外部**逐条测：
 
 ```bash
-curl -I https://<域名>/                                    # 401：鉴权生效
-curl -u demo:密码 -o /dev/null -w "%{http_code}\n" https://<域名>/    # 200
-curl https://<域名>/health                                 # 免密可达
-curl -u demo:密码 -F file=@README.md https://<域名>/api/upload        # 403：上传已关
+curl -o /dev/null -w "%{http_code}\n" https://<域名>/                      # 200：页面可匿名打开
+curl https://<域名>/health                                                # 免密可达
+curl -o /dev/null -w "%{http_code}\n" "https://<域名>/api/papers/search?q=test"   # 401：接口要求登录
+curl -c /tmp/c -X POST https://<域名>/api/auth/login \
+     -H 'Content-Type: application/json' \
+     -d '{"username":"<用户名>","password":"<密码>"}'                     # 200 且下发 Cookie
+curl -b /tmp/c -o /dev/null -w "%{http_code}\n" "https://<域名>/api/papers/search?q=test"   # 200：登录后可检索
 ```
 
-浏览器完整走一遍：登录 → 提问 → 看到逐字流式回答 → 刷新页面历史还在。
+浏览器完整走一遍：匿名能看到界面 → 点发送弹登录框 → 登录后自动发出那条问题 → 看到逐字流式回答 → 刷新页面历史还在 → 退出登录。
 
 **为什么每条都要测**：部署失败常常是「大部分对、某一项静默失效」。
 
@@ -366,6 +368,9 @@ curl -u demo:密码 -F file=@README.md https://<域名>/api/upload        # 403�
 | 改 Caddy 配置 | `sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy` |
 | 内存 | `free -h` |
 | 各服务资源 | `systemd-cgtop` |
+| 添加用户 | `cd ~/tech-chat && .venv/bin/python -m app.users add <用户名>` |
+| 列出用户 | `.venv/bin/python -m app.users list` |
+| 改密码 / 停用 / 删除 | `.venv/bin/python -m app.users passwd\|disable\|enable\|delete <用户名>` |
 | 解封 IP | `sudo fail2ban-client set caddy-auth unbanip <IP>` |
 
 **排查顺序**：`systemctl status` → `journalctl` 最后几十行 → Caddy 日志 → 防火墙。
@@ -397,6 +402,15 @@ Caddyfile 里漏了 `flush_interval -1`。
 **服务反复重启**
 多半是内存超限。`journalctl` 里搜索 `Killed`，或 `free -h` 看 swap 使用。可调大 `MemoryMax` 或减少并发。
 
+**登录接口返回 503「系统还没有任何用户」**
+还没建账号。用 `.venv/bin/python -m app.users add <用户名>` 添加，见附录 A。
+
+**改了前端，浏览器还是旧界面**
+静态资源已设 `Cache-Control: no-cache`，正常刷新即可生效；若浏览器仍缓存旧版，按 `Ctrl+Shift+R` 强制刷新一次。
+
+**打开页面提示「历史记录加载失败」**
+旧版前端的问题：未登录时 `/api/history` 返回 401 被当作错误。当前版本未登录不再请求历史，更新代码后强制刷新即可。
+
 ---
 
 ## 不要做的事
@@ -405,3 +419,50 @@ Caddyfile 里漏了 `flush_interval -1`。
 - **不要把 `.env` 提交到 git**（`.gitignore` 已排除，别强行 `git add -f`）。
 - **不要用 `--workers` 大于 1**（每份进程各加载一份模型，内存翻倍）。
 - **不要在公网关闭 `ALLOW_UPLOAD` 以外什么都不做**（没有鉴权就等于把 API 额度公开）。
+- **不要同时开 Caddy 的 Basic Auth 和应用登录**（会弹两次密码框）。
+
+---
+
+## 附录 A：用户与登录
+
+系统**不开放注册**，账号只能在服务器上用命令行添加，这样只有持有服务器权限的人才能决定谁能用。
+
+### 创建账号
+
+```bash
+cd ~/tech-chat
+.venv/bin/python -m app.users add hr      # 回车后输入两次密码（至少 8 位）
+.venv/bin/python -m app.users list        # 确认
+```
+
+### 常用命令
+
+| 操作 | 命令 |
+| --- | --- |
+| 添加用户 | `python -m app.users add <用户名>` |
+| 修改密码（旧会话立即失效） | `python -m app.users passwd <用户名>` |
+| 停用（立即踢下线） | `python -m app.users disable <用户名>` |
+| 重新启用 | `python -m app.users enable <用户名>` |
+| 删除 | `python -m app.users delete <用户名>` |
+| 列出 | `python -m app.users list` |
+
+（命令前加 `.venv/bin/`，或在项目目录 `source .venv/bin/activate` 之后直接 `python -m app.users ...`）
+
+### 行为说明
+
+- **页面可以匿名浏览**，点击发送时才弹登录框；登录成功后自动把刚才那条问题发出去。
+- 登录状态用 HttpOnly + SameSite=Lax 的 Cookie，有效期由 `SESSION_TTL_DAYS` 控制（默认 7 天）。
+- 密码存 bcrypt 哈希，会话只存 token 的 SHA-256，数据库泄露也拿不到可用凭据。
+- 同一用户名 15 分钟内失败 10 次，锁定 15 分钟。
+- 改密码、停用账号会立即让该用户所有会话失效。
+- **当前所有账号看到的是同一份会话历史**（会话尚未按用户隔离），知道会话 ID 即可读取。需要按人隔离时，要把会话与用户名绑定，属于后续工作。
+
+### 相关接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/auth/login` | `{"username","password"}` → 下发会话 Cookie |
+| `POST` | `/api/auth/logout` | 删除服务端会话并清 Cookie |
+| `GET` | `/api/auth/me` | 返回 `{"logged_in","username"}` |
+
+`/api/chat`、`/api/history`、`/api/papers/*` 要求登录；`/health` 保持公开。
